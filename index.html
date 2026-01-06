@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多智能体模拟可视化</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Socket.IO 客户端库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        /* 自定义滚动条样式 (可选, 美化) */
+        #log::-webkit-scrollbar {
+            width: 8px;
+        }
+        #log::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        #log::-webkit-scrollbar-thumb {
+            background: #cbd5e1; /* tailwind gray-300 */
+            border-radius: 10px;
+        }
+        #log::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; /* tailwind gray-400 */
+        }
+        /* 为日志条目添加一点动画 */
+        .log-entry {
+            animation: fadeIn 0.3s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="font-sans bg-gray-100 h-screen flex flex-col">
+
+    <!-- 1. 头部 -->
+    <header class="bg-white shadow-md z-10">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <h1 class="text-xl font-bold text-gray-800">多智能体模拟可视化</h1>
+            <div id="status-indicator" class="flex items-center space-x-2">
+                <span id="status-text" class="text-gray-500 text-sm">等待连接...</span>
+                <div id="status-dot" class="w-3 h-3 bg-gray-400 rounded-full animate-pulse"></div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 2. 主内容区 -->
+    <main class="flex-1 flex flex-col md:flex-row container mx-auto p-4 gap-4 overflow-hidden">
+
+        <!-- 2.1 主日志流 -->
+        <div class="flex-1 flex flex-col bg-white rounded-lg shadow-lg overflow-hidden">
+            <!-- 控制栏 -->
+            <div class="p-4 border-b border-gray-200 flex flex-wrap items-center gap-2">
+                <button id="btn-start" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed">
+                    ▶️ 开始模拟
+                </button>
+                <button id="btn-pause" class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded-lg shadow transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                    ⏸ 暂停
+                </button>
+                <button id="btn-resume" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg shadow transition-all duration-150 hidden disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                    ▶️ 继续
+                </button>
+                <button id="btn-next" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg shadow transition-all duration-150 hidden disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                    ⏭ 下一步
+                </button>
+                <div class="flex-1 min-w-[200px] text-right">
+                    <span id="time-display" class="text-lg font-semibold text-gray-700 bg-gray-100 px-3 py-1 rounded-md">时间: N/A</span>
+                    <span id="tick-display" class="text-lg font-semibold text-gray-700 bg-gray-100 px-3 py-1 rounded-md ml-2">Tick: 0</span>
+                </div>
+            </div>
+            <!-- 日志容器 -->
+            <div id="log" class="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50">
+                <!-- 日志条目将在这里动态插入 -->
+            </div>
+        </div>
+
+        <!-- 2.2 状态侧边栏 (可选) -->
+        <div class="w-full md:w-1/3 lg:w-1/4 flex flex-col">
+            <div class="bg-white rounded-lg shadow-lg p-4 flex-1 overflow-y-auto">
+                <h2 class="text-lg font-semibold text-gray-800 border-b pb-2 mb-3">智能体状态</h2>
+                <div id="agent-status-list" class="space-y-2">
+                    <p class="text-gray-500 italic">模拟开始后将显示智能体列表...</p>
+                    <!-- 智能体状态卡片将在这里动态插入 -->
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- 元素引用 ---
+            const statusText = document.getElementById('status-text');
+            const statusDot = document.getElementById('status-dot');
+            const logContainer = document.getElementById('log');
+            const timeDisplay = document.getElementById('time-display');
+            const tickDisplay = document.getElementById('tick-display');
+            const agentStatusList = document.getElementById('agent-status-list');
+
+            const btnStart = document.getElementById('btn-start');
+            const btnPause = document.getElementById('btn-pause');
+            const btnResume = document.getElementById('btn-resume');
+            const btnNext = document.getElementById('btn-next');
+
+            // --- 全局状态 ---
+            let isSimulationRunning = false;
+            let isSimulationPaused = false;
+            let agentLocations = {}; // 存储智能体位置
+
+            // --- WebSocket 连接 ---
+            // 自动检测协议 (http -> ws, https -> wss)
+            const socketProtocol = window.location.protocol === 'https:.' ? 'wss://' : 'ws://';
+            const socketURL = socketProtocol + document.domain + ':' + location.port;
+            const socket = io(socketURL);
+
+            // --- 状态更新函数 ---
+            function updateButtonStates() {
+                btnStart.disabled = isSimulationRunning;
+                btnPause.disabled = !isSimulationRunning || isSimulationPaused;
+                btnResume.disabled = !isSimulationRunning || !isSimulationPaused;
+                btnNext.disabled = !isSimulationRunning || !isSimulationPaused;
+
+                btnPause.classList.toggle('hidden', isSimulationPaused);
+                btnResume.classList.toggle('hidden', !isSimulationPaused);
+                btnNext.classList.toggle('hidden', !isSimulationPaused);
+            }
+
+            function updateAgentStatus(agentName, location) {
+                if (!agentLocations[agentName] || agentLocations[agentName].location !== location) {
+                    agentLocations[agentName] = { location: location };
+
+                    let agentCard = document.getElementById(`agent-card-${agentName}`);
+                    if (!agentCard) {
+                        agentCard = document.createElement('div');
+                        agentCard.id = `agent-card-${agentName}`;
+                        agentCard.className = 'p-3 bg-gray-100 rounded-lg shadow-sm';
+                        agentStatusList.appendChild(agentCard);
+                    }
+                    agentCard.innerHTML = `
+                        <div class="font-semibold text-blue-600">${agentName}</div>
+                        <div class="text-sm text-gray-700">📍 ${location}</div>
+                    `;
+                }
+            }
+
+            // --- 日志添加函数 ---
+            function addLogEntry(htmlContent, type = 'info') {
+                const entry = document.createElement('div');
+                entry.className = `log-entry p-3 rounded-lg shadow-sm text-sm ${type}`;
+                entry.innerHTML = htmlContent;
+                logContainer.appendChild(entry);
+                // 自动滚动到底部
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+
+            // --- SocketIO 事件监听 ---
+            socket.on('connect', () => {
+                statusText.textContent = '已连接';
+                statusDot.classList.remove('bg-gray-400', 'animate-pulse');
+                statusDot.classList.add('bg-green-500');
+                addLogEntry('✅ 已连接到模拟服务器。', 'bg-green-100 text-green-800');
+                updateButtonStates();
+            });
+
+            socket.on('disconnect', () => {
+                statusText.textContent = '已断开';
+                statusDot.classList.remove('bg-green-500');
+                statusDot.classList.add('bg-red-500');
+                addLogEntry('❌ 已与服务器断开连接。', 'bg-red-100 text-red-800');
+                isSimulationRunning = false;
+                isSimulationPaused = false;
+                updateButtonStates();
+            });
+
+            socket.on('log_message', (data) => {
+                const message = data.message || '(无消息)';
+                let type = 'bg-gray-100 text-gray-700';
+                if (message.includes('❌') || message.includes('失败') || message.includes('错误')) {
+                    type = 'bg-red-100 text-red-800';
+                } else if (message.includes('⚠️')) {
+                    type = 'bg-yellow-100 text-yellow-800';
+                } else if (message.includes('✅') || message.includes('成功')) {
+                    type = 'bg-green-100 text-green-800';
+                }
+                addLogEntry(message.replace(/\n/g, '<br>'), type);
+            });
+
+            socket.on('simulation_initialized', (data) => {
+                isSimulationRunning = true;
+                isSimulationPaused = false;
+                updateButtonStates();
+                agentStatusList.innerHTML = ''; // 清空列表
+                agentLocations = {};
+                if (data.agent_names && data.agent_names.length > 0) {
+                    data.agent_names.forEach(name => {
+                        updateAgentStatus(name, 'houseZ'); // 假设初始位置
+                    });
+                } else {
+                    agentStatusList.innerHTML = '<p class="text-gray-500 italic">未能加载智能体。</p>';
+                }
+            });
+
+            socket.on('simulation_started', () => {
+                isSimulationRunning = true;
+                isSimulationPaused = false;
+                updateButtonStates();
+            });
+
+            socket.on('simulation_paused', () => {
+                isSimulationPaused = true;
+                updateButtonStates();
+            });
+
+            socket.on('simulation_resumed', () => {
+                isSimulationPaused = false;
+                updateButtonStates();
+            });
+
+            socket.on('simulation_finished', () => {
+                isSimulationRunning = false;
+                isSimulationPaused = false;
+                updateButtonStates();
+                btnStart.disabled = false; // 允许重新开始
+                addLogEntry('🏁 模拟已结束。', 'bg-blue-100 text-blue-800');
+            });
+
+            socket.on('simulation_state', (data) => {
+                // 用于新连接的客户端同步状态
+                isSimulationRunning = data.running;
+                isSimulationPaused = data.paused;
+                tickDisplay.textContent = `Tick: ${data.tick}`;
+                timeDisplay.textContent = `时间: ${data.time}`;
+                updateButtonStates();
+            });
+
+            socket.on('timestep', (data) => {
+                tickDisplay.textContent = `Tick: ${data.tick}`;
+                timeDisplay.textContent = `时间: ${data.time}`;
+                let advancedMsg = data.advanced ? ` (推进了 ${data.advanced})` : '';
+                addLogEntry(`
+                    <div class="font-bold text-indigo-700">
+                        --- 模拟时间步 ${data.tick} | 时间: ${data.time}${advancedMsg} ---
+                    </div>
+                `, 'bg-indigo-100 border-l-4 border-indigo-400');
+            });
+
+            socket.on('world_event', (data) => {
+                // 【新增】处理世界事件
+                addLogEntry(`
+                    <div class="font-semibold text-purple-700">🌍 世界事件</div>
+                    <div>${data.message}</div>
+                `, 'bg-purple-100');
+            });
+
+            socket.on('observation', (data) => {
+                updateAgentStatus(data.agent, data.location); // 更新侧边栏位置
+                addLogEntry(`
+                    <div class="font-semibold text-gray-700">👀 ${data.agent} (在 ${data.location}) 观察到:</div>
+                    <div class="pl-2 italic text-gray-600">${data.content.replace(/\n/g, '<br>')}</div>
+                `, 'bg-gray-100');
+            });
+
+            socket.on('decision', (data) => {
+                // 【修改】显示估算时长
+                const duration = data.duration || 'N/A';
+                addLogEntry(`
+                    <div class="font-semibold text-blue-700">🧠 ${data.agent} 决定:</div>
+                    <div class="pl-2">${data.action_plan}</div>
+                    <div class="pl-2 text-xs text-blue-500">(估时 ${duration} 分钟)</div>
+                `, 'bg-blue-50');
+            });
+
+            socket.on('execution', (data) => {
+                updateAgentStatus(data.agent, data.new_location); // 更新侧边栏位置
+                addLogEntry(`
+                    <div class="font-semibold text-green-700">🚀 ${data.event_result}</div>
+                    <div class="text-xs text-gray-500">(原始计划: ${data.action_taken})</div>
+                `, 'bg-green-50');
+            });
+
+            // --- 按钮事件绑定 ---
+            btnStart.addEventListener('click', () => {
+                socket.emit('start_simulation');
+                btnStart.disabled = true; // 立即禁用防止重复点击
+            });
+            btnPause.addEventListener('click', () => socket.emit('pause_simulation'));
+            btnResume.addEventListener('click', () => socket.emit('resume_simulation'));
+            btnNext.addEventListener('click', () => socket.emit('next_step'));
+
+            // --- 初始状态 ---
+            updateButtonStates();
+        });
+    </script>
+</body>
+</html>
+

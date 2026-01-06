@@ -1,0 +1,16 @@
+langchain==0.2.5
+langchain-core==0.2.27
+langgraph==0.2.5
+
+langchain-openai==0.1.8
+langchain-community==0.2.5
+sentence-transformers==2.7.0
+faiss-cpu==1.8.0
+neo4j==5.21.0
+numpy==1.26.4
+python-dotenv==1.0.1
+pydantic==2.8.2
+python-levenshtein==0.25.1
+langsmith==0.1.75
+graphrag[llm,storage,workflows]>=1.0.0
+pyyaml>=6.0
