@@ -1,0 +1,18 @@
+# Python 编译垃圾 (必须忽略！)
+__pycache__/
+*.pyc
+
+# 环境变量 (千万不要上传这个，里面可能有API Key！)
+.env
+.env.local
+
+# IDE 配置文件夹 (这是你个人的编辑器配置，不需要给别人看)
+.idea/
+.vscode/
+
+# 系统垃圾
+.DS_Store
+
+# 虚拟环境 (如果你的环境在项目里)
+venv/
+env/
