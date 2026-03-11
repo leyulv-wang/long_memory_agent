@@ -190,18 +190,6 @@ Performance on LongMemEval benchmark:
 | GA     | 0.5862               | 0.2414              |
 | **DuMF-Agent** | **0.7241**   | **0.5517**          |
 
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@article{dumf2025,
-  title={DuMF-Agent: A Dual-Channel Memory Framework for Long-Term Conversational Agents},
-  author={Your Name},
-  year={2025}
-}
-```
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
