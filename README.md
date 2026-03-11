@@ -85,6 +85,30 @@ python utils/init_neo4j_schema.py
 python utils/create_fulltext_index.py
 ```
 
+6. (Optional) Start local embedding server:
+```bash
+python embedding_server.py
+```
+
+## Data Preparation
+
+This project uses the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark for evaluation.
+
+1. Download the dataset from the official repository
+2. Place the files in `data/long_memory_eval/`:
+   - `sampled_test_questions.json` - Sample setting (~500 instances, 2-4k tokens each)
+   - `medium_test_questions.json` - Hard setting (~500 instances, ~115k tokens each)
+
+Directory structure:
+```
+data/
+├── long_memory_eval/
+│   ├── sampled_test_questions.json
+│   └── medium_test_questions.json
+├── books/           # Character profiles (optional)
+└── world_knowledge/ # World knowledge base (optional)
+```
+
 ## Configuration
 
 Key parameters in `.env`:
@@ -115,9 +139,24 @@ response = agent.chat("What did we discuss about the project last week?")
 ### Running Evaluation
 
 ```bash
-# Run on LongMemEval benchmark
+# Run on LongMemEval sample setting
 python test/Long_Memory_test.py
+
+# Results will be saved to result/simple/long_memory_results.jsonl
 ```
+
+### Embedding Server
+
+For local embedding (recommended for development):
+```bash
+# Start the embedding server first
+python embedding_server.py
+
+# Configure in .env:
+# GRAPHRAG_EMBEDDING_API_BASE=http://127.0.0.1:8000
+```
+
+For online embedding API, configure SiliconFlow or other providers in `.env`.
 
 ## Project Structure
 
