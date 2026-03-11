@@ -1,82 +1,173 @@
-认知架构智能体项目
-本项目是《认知架构智能体的工程蓝图：从理论到实现》规划文档的完整Python代码实现。它构建了一个基于双记忆系统（情节性记忆和语义知识图谱）的智能体，并使用LangGraph编排其认知循环。
+# DuMF-Agent: Dual-Channel Memory Framework for Long-Term Conversational Agents
 
-项目结构
-/cognitive_agent         # 智能体核心逻辑
-    /stes.py                 # 短期情节性记忆存储 (STES) - FAISS
-    /ltss.py                 # 长期语义知识存储 (LTSS) - Neo4j
-    /consolidation_engine.py # 记忆巩固引擎
-    /agent_state.py          # LangGraph 状态定义
-    /agent_nodes.py          # LangGraph 认知节点
-    /agent_graph.py          # LangGraph 图构建与编译
-/evaluation                # 自动化评估沙盒
-    # ...
-/verification              # 部署验证脚本
-    # ...
-main.py                    # 项目主入口/演示脚本
-requirements.txt           # Python依赖
-.env                       # 环境变量 (需自行创建)
-AURA_SETUP_GUIDE.md      # [新] Neo4j AuraDB 设置指南
-README.md                  # 本文档
+A long-term memory architecture for conversational AI that addresses memory fragmentation, temporal confusion, and cross-session reasoning instability through unified memory representation, retrieval-reading closed-loop, and temporal version consistency mechanisms.
 
-设置步骤
-1. 安装先决条件
-Python 3.10+
+## Architecture Overview
 
-一个 Neo4j AuraDB 云数据库实例 (推荐使用免费套餐)
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DuMF-Agent Architecture                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐    ┌──────────────────────────────────────────────────┐   │
+│  │   User      │    │              Dual-Channel Memory                 │   │
+│  │   Query     │───▶│  ┌────────────────┐  ┌────────────────────────┐ │   │
+│  └─────────────┘    │  │  RAW Channel   │  │  CONSOLIDATED Channel  │ │   │
+│                     │  │  (Evidence)    │  │  (SimpleFact + Triple) │ │   │
+│                     │  └────────────────┘  └────────────────────────┘ │   │
+│                     └──────────────────────────────────────────────────┘   │
+│                                      │                                      │
+│                     ┌────────────────▼────────────────┐                    │
+│                     │      Hybrid Retrieval           │                    │
+│                     │  • Query Expansion              │                    │
+│                     │  • Vector + BM25 + Multi-hop    │                    │
+│                     │  • Unified Re-ranking           │                    │
+│                     └────────────────┬────────────────┘                    │
+│                                      │                                      │
+│                     ┌────────────────▼────────────────┐                    │
+│                     │      Context Construction       │                    │
+│                     │  • Version Detection            │                    │
+│                     │  • Temporal Filtering           │                    │
+│                     │  • Evidence Organization        │                    │
+│                     └────────────────┬────────────────┘                    │
+│                                      │                                      │
+│                     ┌────────────────▼────────────────┐                    │
+│                     │         LLM Generation          │                    │
+│                     └─────────────────────────────────┘                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-2. 获取云数据库凭证
-您需要从您的 Neo4j AuraDB 控制面板获取连接信息。
+## Key Features
 
-请参考 AURA_SETUP_GUIDE.md 文件获取详细的图文指导。
+- **Three-Layer Memory Representation**: Evidence (RAW/TextUnit), Language (SimpleFact), and Structure (Structured Triple) layers with cross-references for traceable reasoning
+- **Retrieval-Reading Closed-Loop**: Query expansion, hybrid retrieval (vector + BM25 + multi-hop), and unified re-ranking with confidence-aware scoring
+- **Temporal Version Consistency**: Append-only storage with dynamic version detection to distinguish current vs. historical facts
 
-3. 设置Python环境
-建议使用虚拟环境以避免包冲突。
+## Installation
 
-# 创建虚拟环境
+### Prerequisites
+
+- Python 3.9+
+- Neo4j 5.x (local or Aura cloud)
+- CUDA-compatible GPU (optional, for local embeddings)
+
+### Setup
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/DuMF-Agent.git
+cd DuMF-Agent
+```
+
+2. Create virtual environment:
+```bash
 python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# or
+.venv\Scripts\activate     # Windows
+```
 
-# 激活虚拟环境
-# macOS/Linux:
-source .venv/bin/activate
-# Windows:
-# .\.venv\Scripts\activate
-
-# 安装依赖
+3. Install dependencies:
+```bash
 pip install -r requirements.txt
+```
 
-4. 创建.env文件
-在项目根目录创建一个名为.env的文件，并将您从云数据库获取的凭证填入其中。请不要将此文件提交到版本控制中。
+4. Configure environment:
+```bash
+cp .env.example .env
+# Edit .env with your API keys and database credentials
+```
 
-.env 文件示例:
+5. Initialize Neo4j schema:
+```bash
+python utils/init_neo4j_schema.py
+python utils/create_fulltext_index.py
+```
 
-# OpenAI API Key
-OPENAI_API_KEY="sk-..."
+## Configuration
 
-# Neo4j AuraDB Database Credentials
-NEO4J_URI="neo4j+s://xxxxxxxx.databases.neo4j.io" # 替换成你的云数据库URI
-NEO4J_USERNAME="neo4j"
-NEO4J_PASSWORD="YOUR_AURA_PASSWORD" # 替换成你的云数据库密码
+Key parameters in `.env`:
 
-# (可选) LangSmith API Key for Tracing
-LANGCHAIN_TRACING_V2="true"
-LANGCHAIN_API_KEY="ls__..."
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `GRAPHRAG_CHAT_MODEL` | LLM for generation | gpt-4o-mini |
+| `GRAPHRAG_EMBEDDING_MODEL` | Embedding model | BAAI/bge-m3 |
+| `NEO4J_URI` | Neo4j connection URI | neo4j://127.0.0.1:7687 |
+| `EVIDENCE_FILTER_LEVEL` | Evidence filtering strictness | lenient |
 
-如何运行
-1. 运行连接验证脚本
-在开始构建复杂逻辑前，请先运行验证脚本，确保所有核心组件都已正确配置。
+See `.env.example` for full configuration options.
 
-python verification/verify_llm.py
-python verification/verify_neo4j.py
+## Usage
 
-您应该会看到每个脚本都输出“验证成功”的信息。
+### Basic Usage
 
-2. 运行主程序演示
-main.py 脚本提供了一个完整的端到端演示。
+```python
+from agent.agent import DuMFAgent
 
-python main.py
+# Initialize agent
+agent = DuMFAgent(agent_id="user_001")
 
-观察终端输出，您可以看到智能体从感知、聚焦上下文、规划到行动的完整认知流程。
+# Process conversation
+response = agent.chat("What did we discuss about the project last week?")
+```
 
-许可证
-本项目采用 MIT 许可证。
+### Running Evaluation
+
+```bash
+# Run on LongMemEval benchmark
+python test/Long_Memory_test.py
+```
+
+## Project Structure
+
+```
+DuMF-Agent/
+├── agent/                  # Core agent implementation
+│   ├── agent.py           # Main agent class
+│   ├── simple_retriever.py # Hybrid retrieval system
+│   └── context_builder.py  # Context construction
+├── memory/                 # Memory system
+│   ├── dual_memory_system.py
+│   ├── structured_memory.py
+│   └── stores.py
+├── temporal_reasoning/     # Temporal reasoning module
+│   ├── executor.py
+│   └── intent_router.py
+├── prompts/               # Prompt templates
+├── utils/                 # Utility functions
+└── test/                  # Test scripts
+```
+
+## Evaluation Results
+
+Performance on LongMemEval benchmark:
+
+| Method | Overall Acc. (Sample) | Overall Acc. (Hard) |
+|--------|----------------------|---------------------|
+| LLM    | 0.7500               | 0.4138              |
+| RAG    | 0.6724               | 0.5172              |
+| Mem0   | 0.5690               | 0.2759              |
+| GA     | 0.5862               | 0.2414              |
+| **DuMF-Agent** | **0.7241**   | **0.5517**          |
+
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@article{dumf2025,
+  title={DuMF-Agent: A Dual-Channel Memory Framework for Long-Term Conversational Agents},
+  author={Your Name},
+  year={2025}
+}
+```
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- LongMemEval benchmark for evaluation framework
+- Neo4j for graph database support

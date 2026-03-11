@@ -75,12 +75,19 @@ def invoke_json(llm: ChatOpenAI, prompt: str) -> str:
     尽量强制模型只输出 JSON。
     - 优先使用 response_format（不同供应商/版本可能支持情况不同）
     - 不支持则退化为普通 invoke
+    - ✅ 使用低温确保输出稳定
     返回：模型输出的 raw string（JSON 文本，可能带```，上层可 repair_json）
     """
-    # 尝试强制 JSON 输出
+    # 尝试强制 JSON 输出 + 低温
     try:
-        llm_json = llm.bind(response_format={"type": "json_object"})
+        llm_json = llm.bind(response_format={"type": "json_object"}, temperature=0.0)
         return llm_json.invoke(prompt).content.strip()
     except Exception:
-        # fallback：普通输出
+        pass
+    # fallback：只设置低温
+    try:
+        llm_low = llm.bind(temperature=0.0)
+        return llm_low.invoke(prompt).content.strip()
+    except Exception:
+        # 最后 fallback：普通输出
         return llm.invoke(prompt).content.strip()

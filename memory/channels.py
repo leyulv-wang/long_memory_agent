@@ -74,7 +74,8 @@ def cypher_mark_rels_channel_connected_to_doc_nodes() -> str:
         r.agent_name = $agent_name,
         r.turn_id = $turn_id,
         r.virtual_time = $virtual_time,
-        r.confidence = coalesce(r.confidence, 1.0)
+        r.confidence = coalesce(r.confidence, 1.0),
+        r.event_timestamp = coalesce(r.event_timestamp, $session_time_iso, $virtual_time)
     RETURN count(r) AS updated_rels
     """.strip()
 
@@ -116,6 +117,7 @@ def build_mark_params(
     agent_name: str,
     channel: str,
     virtual_time: Optional[str],
+    session_time_iso: Optional[str] = None,
 ) -> Dict[str, Any]:
     c = normalize_channel(channel)
     turn_id = parse_turn_id(virtual_time)
@@ -125,6 +127,7 @@ def build_mark_params(
         "channel": c,
         "virtual_time": virtual_time or "unknown",
         "turn_id": turn_id,
+        "session_time_iso": session_time_iso or "",
     }
 def cypher_create_event_and_link_textunit() -> str:
     return """

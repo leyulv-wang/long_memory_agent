@@ -1,30 +1,28 @@
+# -*- coding: utf-8 -*-
+import os
 import time
-# 导入 LLM 类 (用于 Chat 测试)
+from typing import Dict, Optional
+
 from langchain_openai import ChatOpenAI
-# 导入 Neo4j 驱动 (用于数据库测试)
 from neo4j import GraphDatabase, basic_auth
 
-# 导入配置
 from config import (
     GRAPHRAG_API_BASE,
     GRAPHRAG_CHAT_API_KEY,
     GRAPHRAG_CHAT_MODEL,
     NEO4J_URI,
     NEO4J_USERNAME,
-    NEO4J_PASSWORD
+    NEO4J_PASSWORD,
 )
 
-# 【修改】直接导入我们在 utils/embedding.py 中写好的工厂函数
 from utils.embedding import get_embedding_model
 
 
-def test_llm_connection():
-    """
-    测试与大语言模型 (Chat) 的连接。
-    """
-    print("正在测试 LLM (Chat) 连接...")
+def test_llm_connection() -> Optional[bool]:
+    """Test LLM chat API connectivity."""
+    print("Testing LLM (chat) connection...")
     if not all([GRAPHRAG_API_BASE, GRAPHRAG_CHAT_API_KEY, GRAPHRAG_CHAT_MODEL]):
-        print("🟡 LLM 连接跳过: 环境变量未完全配置。")
+        print("SKIP LLM: missing env vars.")
         return None
 
     try:
@@ -32,80 +30,75 @@ def test_llm_connection():
             model=GRAPHRAG_CHAT_MODEL,
             api_key=GRAPHRAG_CHAT_API_KEY,
             base_url=GRAPHRAG_API_BASE,
-            timeout=60
+            timeout=60,
         )
-
-        print(f"--- 正在向 {GRAPHRAG_API_BASE} 发送请求... ---")
         start_time = time.time()
         response = llm.invoke("Say hello.")
-        end_time = time.time()
-
+        elapsed = time.time() - start_time
         if response.content:
-            print(f"✅ LLM 连接成功！(耗时: {end_time - start_time:.2f}s)")
-            print(f"--- 回复: {response.content}")
+            print(f"OK LLM: {elapsed:.2f}s")
             return True
-        else:
-            print("❌ LLM 连接失败: API 没有返回内容。")
-            return False
+        print("FAIL LLM: empty response.")
+        return False
     except Exception as e:
-        print(f"❌ LLM 连接失败: {e}")
+        print(f"FAIL LLM: {e}")
         return False
 
 
-def test_neo4j_connection():
-    """
-    测试与 Neo4j 数据库的连接。
-    """
-    print("\n正在测试 Neo4j 数据库连接...")
-    if not all([NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD]):
-        print("🟡 Neo4j 连接跳过: 环境变量未完全配置。")
+def _test_neo4j(uri: str, username: str, password: str, label: str) -> Optional[bool]:
+    if not all([uri, username, password]):
+        print(f"SKIP Neo4j [{label}]: missing env vars.")
         return None
-
     try:
-        driver = GraphDatabase.driver(
-            NEO4J_URI,
-            auth=basic_auth(NEO4J_USERNAME, NEO4J_PASSWORD)
-        )
+        driver = GraphDatabase.driver(uri, auth=basic_auth(username, password))
         driver.verify_connectivity()
-        print("✅ Neo4j 连接成功！")
         driver.close()
+        print(f"OK Neo4j [{label}].")
         return True
     except Exception as e:
-        print(f"❌ Neo4j 连接失败: {e}")
+        print(f"FAIL Neo4j [{label}]: {e}")
         return False
 
 
-def test_embedding_connection():
-    """
-    测试与嵌入模型 (Embedding) 的连接。
-    (支持自动切换 API / 本地模式)
-    """
-    print("\n正在测试 Embedding 模型连接...")
+def test_neo4j_connection() -> Optional[bool]:
+    """Test the active Neo4j connection from config."""
+    print("Testing Neo4j connection (active config)...")
+    return _test_neo4j(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, "active")
 
+
+def test_all_neo4j_connections() -> Dict[str, Optional[bool]]:
+    """Test all available Neo4j connections (local + aura if configured)."""
+    results: Dict[str, Optional[bool]] = {}
+
+    print("Testing Neo4j connections (all)...")
+    results["active"] = _test_neo4j(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, "active")
+
+    aura_uri = os.getenv("NEO4J_AURA_URI")
+    aura_user = os.getenv("NEO4J_AURA_USERNAME", "neo4j")
+    aura_pass = os.getenv("NEO4J_AURA_PASSWORD")
+    if aura_uri or aura_pass:
+        results["aura"] = _test_neo4j(aura_uri or "", aura_user, aura_pass or "", "aura")
+    else:
+        results["aura"] = None
+        print("SKIP Neo4j [aura]: missing env vars.")
+
+    return results
+
+
+def test_embedding_connection() -> Optional[bool]:
+    """Test embedding model connectivity."""
+    print("Testing Embedding connection...")
     try:
-        # 【核心修改】直接调用 get_embedding_model()
-        # 这个函数会自动根据 .env 配置决定是加载本地文件还是连 API
         embedding_model = get_embedding_model()
-
-        test_text = "这是一个嵌入测试。"
-        print(f"  [Embedding] 正在生成向量: '{test_text}'...")
-
+        test_text = "embedding connectivity test"
         start_time = time.time()
-        # 实际测试生成向量
         vector = embedding_model.embed_query(test_text)
-        end_time = time.time()
-
+        elapsed = time.time() - start_time
         if vector and isinstance(vector, list) and len(vector) > 0:
-            print(f"  [Embedding] 耗时: {end_time - start_time:.2f} 秒")
-            print(f"  [Embedding] 成功获取 {len(vector)} 维向量。")
-            print(f"✅ Embedding 模型工作正常！")
+            print(f"OK Embedding: {elapsed:.2f}s, dim={len(vector)}")
             return True
-        else:
-            print("❌ Embedding 模型失败: 未能返回有效的向量。")
-            return False
-
+        print("FAIL Embedding: empty vector.")
+        return False
     except Exception as e:
-        print(f"❌ Embedding 模型错误: {e}")
-        # 提示用户检查路径
-        print("   提示: 如果是本地模式，请检查 .env 中的模型路径是否正确，且文件夹内包含 config.json 等文件。")
+        print(f"FAIL Embedding: {e}")
         return False

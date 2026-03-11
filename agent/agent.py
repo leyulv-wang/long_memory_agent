@@ -14,7 +14,9 @@ from utils.file_parsers import parse_book_to_dict
 from config import memory_consolidation_threshold, CHARACTER_BOOKS_DIR
 
 from .contextual_focus_framework import ContextualFocusFramework
-from .answer_selector import AnswerSelector
+
+# 导入新的提示词模块
+from prompts import get_answer_prompt, classify_question_type
 
 logger = logging.getLogger(__name__)
 _DEBUG_PIPELINE = os.getenv("DEBUG_PIPELINE", "0") == "1"
@@ -64,7 +66,6 @@ class CognitiveAgent:
         )
 
         self.cff = ContextualFocusFramework(self.memory)
-        self.answer_selector = AnswerSelector()
         self.graph = self._build_graph()
 
         logger.info(f"认知智能体 '{self.character_name}' 构建完成。")
@@ -168,17 +169,6 @@ class CognitiveAgent:
             }
 
     @staticmethod
-    def _is_advicey(text: str) -> bool:
-        if not text:
-            return True
-        lower = text.lower()
-        bad_markers = [
-            "consider", "recommend", "popular", "suitable", "you can", "you should",
-            "check reviews", "compare prices", "tips",
-        ]
-        return any(m in lower for m in bad_markers)
-
-    @staticmethod
     def _extract_json(text: str) -> str:
         m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
         if m:
@@ -187,12 +177,30 @@ class CognitiveAgent:
 
     @staticmethod
     def _slice_allowed(ctx: str) -> str:
+        """
+        提取允许作为证据的上下文区块。
+        
+        ✅ 支持多种格式：
+        - 旧格式：=== GRAPH TRIPLES (ALLOWED EVIDENCE) ===
+        - 中间格式：=== LONG-TERM MEMORY FACTS (USE AS EVIDENCE) ===
+        - 新格式（SimpleRetriever）：=== LONG-TERM MEMORY FACTS (语义检索) ===
+        """
         ctx = ctx or ""
         headers = [
+            # 旧格式
             "=== GRAPH TRIPLES (ALLOWED EVIDENCE) ===",
             "=== RAW GRAPH TRIPLES (SUPPLEMENT, ALLOWED EVIDENCE) ===",
+            "=== ORIGINAL TEXT EVIDENCE (USE FOR DETAILED ANSWERS) ===",
             "=== TIMELINE TRIPLES (ALLOWED EVIDENCE) ===",
             "=== DERIVED FACTS (ALLOWED EVIDENCE) ===",
+            # 中间格式
+            "=== LONG-TERM MEMORY FACTS (USE AS EVIDENCE) ===",
+            "=== RAW SUPPLEMENT (ALLOWED EVIDENCE) ===",
+            "=== TIMELINE (ALLOWED EVIDENCE) ===",
+            # 新格式（SimpleRetriever 输出）
+            "=== LONG-TERM MEMORY FACTS (语义检索) ===",
+            "=== KEYWORD MATCHED FACTS (关键词检索) ===",
+            "=== ORIGINAL TEXT (原文兜底) ===",
         ]
         lines = ctx.splitlines()
         kept = []
@@ -236,31 +244,162 @@ class CognitiveAgent:
 
     def _build_evidence_catalog(self, retrieved_context: str, max_items: int = 120) -> list[str]:
         """
-        稳定性修补（不新增能力，只避免因为格式问题丢证据）：
-        - 过滤 knowledge_type=logical_inference（保持你原逻辑）
-        - 允许三元组行不是 '-' 开头（例如 '(A) -[R]-> (B)'），也能进入 catalog
-        - 允许 bullet '•' 行进入（会自动转成 '- '）
+        构建证据目录，支持多种格式：
+        
+        旧格式：- (A) -[REL]-> (B) [k=v; ...]
+        新格式（SimpleRetriever）：
+            [Fact N] 主要内容
+              时间: session_time=xxx, turn_id=xxx
+              来源: source=user, score=0.8
+            [Match N] 主要内容（关键词检索）
+              时间: session_time=xxx, turn_id=xxx
+              来源: source=user
+            [Turn N] (时间) 原文内容
+        
+        ✅ 处理逻辑：
+        - 识别 [Fact N]、[Match N]、[Turn N] 开头的行作为主要证据
+        - 将 Fact/Match 块的信息合并成一行，便于 LLM 引用
+        - 保留时间和来源信息用于排序
         """
         allowed_ctx = self._slice_allowed(retrieved_context or "")
+        
+        # ✅ 调试：打印 allowed_ctx 的前 2000 个字符
+        if _DEBUG_PIPELINE:
+            logger.info(f"[_build_evidence_catalog] allowed_ctx length={len(allowed_ctx)}")
+            logger.info(f"[_build_evidence_catalog] allowed_ctx preview:\n{allowed_ctx[:2000]}")
+            # 检查是否包含 KEYWORD MATCHED FACTS
+            if "=== KEYWORD MATCHED FACTS" in allowed_ctx:
+                logger.info(f"[_build_evidence_catalog] ✅ Contains KEYWORD MATCHED FACTS section")
+                # 找到 KEYWORD 部分的位置
+                keyword_pos = allowed_ctx.find("=== KEYWORD MATCHED FACTS")
+                logger.info(f"[_build_evidence_catalog] KEYWORD section starts at position {keyword_pos}")
+                logger.info(f"[_build_evidence_catalog] KEYWORD section preview:\n{allowed_ctx[keyword_pos:keyword_pos+1000]}")
+            else:
+                logger.info(f"[_build_evidence_catalog] ❌ KEYWORD MATCHED FACTS section NOT FOUND")
+        
         catalog: list[str] = []
-
-        for ln in allowed_ctx.splitlines():
-            s = (ln or "").strip()
+        
+        lines = allowed_ctx.splitlines()
+        i = 0
+        while i < len(lines):
+            s = (lines[i] or "").strip()
+            
             if not s:
+                i += 1
                 continue
             if s.startswith("===") and s.endswith("==="):
+                i += 1
                 continue
-            if s.lower() in ("none", "无", "无相关长期知识。"):
+            if s.lower() in ("none", "无", "无相关长期知识。", "无相关长期记忆。", "无关键词匹配结果。", "无相关原文。"):
+                i += 1
                 continue
-
+            # 跳过匹配关键词说明行
+            if s.startswith("匹配关键词:") or s.startswith("（关键词匹配结果已包含在语义检索中）"):
+                i += 1
+                continue
+            
+            # ✅ 新格式：[Fact N] 或 [Match N] 开头
+            if s.startswith("[Fact ") or s.startswith("[Match "):
+                # ✅ 调试：记录解析的 Fact/Match
+                is_match = s.startswith("[Match ")
+                if _DEBUG_PIPELINE and is_match:
+                    logger.info(f"[_build_evidence_catalog] Parsing {s[:80]}")
+                
+                # 解析 Fact/Match 块
+                fact_line = s
+                meta_parts = []
+                session_time = ""
+                
+                # 读取后续的元数据行
+                j = i + 1
+                while j < len(lines):
+                    next_line = (lines[j] or "").strip()
+                    if not next_line:
+                        j += 1
+                        continue
+                    # 遇到下一个证据块或分隔符时停止
+                    if (next_line.startswith("[Fact ") or 
+                        next_line.startswith("[Match ") or 
+                        next_line.startswith("[Turn ") or 
+                        next_line.startswith("===")):
+                        break
+                    
+                    # 解析元数据（注意：元数据行可能有缩进）
+                    next_line_stripped = next_line.lstrip()
+                    if next_line_stripped.startswith("时间:") or next_line_stripped.startswith("时间："):
+                        time_part = next_line_stripped[3:].strip()
+                        meta_parts.append(time_part)
+                        # 提取 session_time 用于排序
+                        st_match = re.search(r'session_time=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})', time_part)
+                        if st_match:
+                            session_time = st_match.group(1)
+                    elif next_line_stripped.startswith("结构:") or next_line_stripped.startswith("结构："):
+                        meta_parts.append(f"结构: {next_line_stripped[3:].strip()}")
+                    elif next_line_stripped.startswith("来源:") or next_line_stripped.startswith("来源："):
+                        meta_parts.append(next_line_stripped[3:].strip())
+                    elif next_line_stripped.startswith("原文:") or next_line_stripped.startswith("原文："):
+                        meta_parts.append(f"原文: {next_line_stripped[3:].strip()}")
+                    
+                    j += 1
+                
+                # 构建合并后的证据行
+                meta_str = "; ".join([p for p in meta_parts if p])
+                if meta_str:
+                    catalog_line = f"{fact_line} [{meta_str}]"
+                else:
+                    catalog_line = fact_line
+                
+                # ✅ 调试：记录构建的 catalog_line
+                if _DEBUG_PIPELINE and is_match:
+                    logger.info(f"[_build_evidence_catalog] Built catalog_line: {catalog_line[:120]}")
+                
+                # 存储 session_time 用于排序
+                catalog.append((catalog_line, session_time))
+                i = j
+                continue
+            
+            # ✅ 原文记录格式：[Turn N] xxx
+            # 注意：原文可能是多行的，需要合并
+            if s.startswith("[Turn "):
+                # 读取后续的原文内容行
+                content_lines = [s]
+                j = i + 1
+                while j < len(lines):
+                    next_line = (lines[j] or "").strip()
+                    if not next_line:
+                        j += 1
+                        continue
+                    # 遇到下一个证据块或分隔符时停止
+                    if (next_line.startswith("[Fact ") or 
+                        next_line.startswith("[Match ") or 
+                        next_line.startswith("[Turn ") or 
+                        next_line.startswith("===")):
+                        break
+                    # 合并原文内容（截取前 500 字符避免过长）
+                    content_lines.append(next_line[:500])
+                    j += 1
+                    # 最多读取 5 行原文
+                    if len(content_lines) > 5:
+                        break
+                
+                # 合并成一行
+                merged_line = " ".join(content_lines)
+                catalog.append((merged_line, "9999-99-99T99:99:99"))  # 原文记录放最后
+                i = j
+                continue
+            
             # 统一 bullet
             if s.startswith("•"):
                 s = "- " + s.lstrip("•").strip()
 
+            # 原文片段（[原文1] xxx 或 [unit_TURN_1] xxx）
+            is_original_text = s.startswith("[原文") or s.startswith("[unit_")
+            
             is_evidence_like = (
                     s.startswith("-")
                     or s.startswith("[DERIVED]")
                     or s.startswith("DERIVED")
+                    or is_original_text
                     or (
                         # 兜底：典型 triple 形态 (A) -[REL]-> (B)
                             s.startswith("(") and (") -[" in s or ")-[" in s) and "]->" in s
@@ -275,14 +414,64 @@ class CognitiveAgent:
                 meta = self._parse_meta(s)
                 kt = (meta.get("knowledge_type") or meta.get("knowledgeType") or "").strip().lower()
                 if kt == "logical_inference":
+                    i += 1
                     continue
 
-                catalog.append(s)
+                # 提取 session_time 用于排序
+                session_time = meta.get("session_time", "9999-99-99T99:99:99")
+                catalog.append((s, session_time))
 
+            i += 1
+            
             if len(catalog) >= max_items:
                 break
 
-        return catalog
+        # ✅ 去重：完全相同的行只保留一个
+        seen = set()
+        unique_catalog = []
+        
+        if _DEBUG_PIPELINE:
+            logger.info(f"[_build_evidence_catalog] Before dedup: catalog size={len(catalog)}")
+            # 统计 Match 的数量
+            match_count = sum(1 for item in catalog if "[Match " in (item[0] if isinstance(item, tuple) else item))
+            logger.info(f"[_build_evidence_catalog] Before dedup: Match count={match_count}")
+        
+        for item in catalog:
+            line = item[0] if isinstance(item, tuple) else item
+            if line not in seen:
+                seen.add(line)
+                unique_catalog.append(item)
+            elif _DEBUG_PIPELINE and "[Match " in line:
+                logger.info(f"[_build_evidence_catalog] DUPLICATE REMOVED: {line[:120]}")
+        
+        catalog = unique_catalog
+        
+        if _DEBUG_PIPELINE:
+            logger.info(f"[_build_evidence_catalog] After dedup: catalog size={len(catalog)}")
+            # 统计 Match 的数量
+            match_count = sum(1 for item in catalog if "[Match " in (item[0] if isinstance(item, tuple) else item))
+            logger.info(f"[_build_evidence_catalog] After dedup: Match count={match_count}")
+
+        # ✅ 排序策略：
+        # - 对于时间顺序问题（order, earliest, latest, first, last），按 session_time 排序
+        # - 对于其他问题，保持原有顺序（相关性排序）
+        # 注意：简化检索器已经按相关性排序，这里不应该打乱
+        # 只有当明确需要时间排序时才重新排序
+        # catalog.sort(key=lambda x: x[1] if isinstance(x, tuple) else "9999-99-99T99:99:99")
+        
+        # 提取最终的行列表
+        result = [item[0] if isinstance(item, tuple) else item for item in catalog]
+        
+        if _DEBUG_PIPELINE:
+            logger.info(f"[_build_evidence_catalog] Final result size={len(result)}")
+            # 统计 Match 的数量
+            match_count = sum(1 for line in result if "[Match " in line)
+            logger.info(f"[_build_evidence_catalog] Final Match count={match_count}")
+            # 输出前 5 条
+            for i, line in enumerate(result[:5], 1):
+                logger.info(f"[_build_evidence_catalog] result[{i}] {line[:120]}")
+        
+        return result
 
     @staticmethod
     def _render_evidence_catalog(catalog: list[str]) -> str:
@@ -320,38 +509,24 @@ class CognitiveAgent:
         return valid_lines
 
     def generate_action(self, state: AgentState) -> Dict[str, Any]:
-        """生成行动节点：先 deterministic derive_answer，失败再调用 LLM。"""
+        """生成行动节点：使用 LLM 生成回答。"""
         logger.info(f"\n========== 3. {self.character_name} 生成行动阶段 ==========")
 
         curr_time_str = state.get("current_time", "Unknown Time")
         observation = (state.get("observation") or "").strip()
         retrieved_context = (state.get("retrieved_context") or "").strip()
 
-        # 1) 尝试确定性回答
-        selected = None
-        try:
-            selected = self.answer_selector.try_select({"observation": observation, "retrieved_context": retrieved_context})
-        except Exception as e:
-            logger.warning(f"[{self.character_name}] AnswerSelector 异常，转 LLM: {e}")
-
-        if selected:
-            return {
-                "action": selected.action,
-                "final_answer": selected.final_answer,
-                "evidence_triples": selected.evidence_triples,
-                                "error": None,
-            }
-
-        if _DEBUG_PIPELINE:
-            logger.info(f"[{self.character_name}][debug] AnswerSelector skipped, using LLM")
-
-        # 2) LLM 回答（闭域）
+        # LLM 回答（闭域）
         catalog = self._build_evidence_catalog(retrieved_context, max_items=180)
 
         if _DEBUG_PIPELINE:
             logger.info(f"[{self.character_name}][debug] evidence catalog size={len(catalog)}")
             if not catalog:
                 logger.info(f"[{self.character_name}][debug] evidence catalog empty")
+            else:
+                # 输出前 5 条证据，帮助调试
+                for i, line in enumerate(catalog[:5], 1):
+                    logger.info(f"[{self.character_name}][debug] catalog[{i}] {line[:150]}...")
         if os.getenv("DEBUG_EVIDENCE", "0") == "1":
             logger.info(
                 f"[{self.character_name}] evidence catalog size={len(catalog)}"
@@ -366,39 +541,24 @@ class CognitiveAgent:
             indent=2,
         )
 
-        prompt = f"""
-You must answer in English!
-
-# 0. Current Status
-- Current Virtual Time: {curr_time_str}
-
-# 1. Core Identity
-{self.character_anchor}
-
-CRITICAL RESTRICTION:
-- You are a CLOSED-DOMAIN memory retrieval agent.
-- You must NOT give advice, tips, plans, or recommendations.
-- You must NOT infer actions, resolutions, or outcomes unless they are EXPLICITLY stated in memory.
-
-# 2. Current Question
-{observation}
-
-# 3. Evidence Catalog (ALLOWED EVIDENCE ONLY)
-Select evidence by ID only. Do NOT copy lines verbatim.
-Catalog:
-{catalog_text}
-
-# 4. Output Requirements
-Return STRICT JSON. Required keys:
-- "final_answer": one or two sentences answering the user's question.
-- "evidence_ids": an array of integers selecting from the catalog above.
-
-Example JSON:
-{example_json}
-""".strip()
+        # ✅ 使用新的多类型提示词模块
+        # 根据问题类型自动选择对应的提示词模板
+        question_type = classify_question_type(observation)
+        if _DEBUG_PIPELINE:
+            logger.info(f"[{self.character_name}][debug] question_type={question_type.value}")
+        
+        prompt = get_answer_prompt(
+            question=observation,
+            current_time=curr_time_str,
+            character_anchor=self.character_anchor,
+            catalog_text=catalog_text,
+            example_json=example_json,
+            question_type=question_type,
+        )
 
         try:
-            response = self.llm.invoke(prompt)
+            # 最终回答使用昂贵模型 + 低温，确保回答质量和稳定性
+            response = self.expensive_llm.bind(temperature=0.0).invoke(prompt)
             llm_output_text = (response.content or "").strip()
             parsed = json.loads(self._extract_json(llm_output_text))
             if not isinstance(parsed, dict):
@@ -412,13 +572,9 @@ Example JSON:
                     f"resolved={len(evidence_triples)}"
                 )
 
-            insufficient = (
-                "don't have enough information" in final_answer.lower()
-                or "do not have enough information" in final_answer.lower()
-            )
-
-            # 禁止建议式回答
-            if (not final_answer) or (self._is_advicey(final_answer) and not insufficient):
+            # ✅ 移除代码强制弃权逻辑，完全依靠 LLM 自主判断
+            # 只在回答为空时才强制弃权（这是异常情况）
+            if not final_answer:
                 final_answer = "I don't have enough information to answer that."
                 evidence_triples = []
 

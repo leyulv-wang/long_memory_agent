@@ -101,9 +101,9 @@ async def _encode_with_retry(texts: List[str], *, batch_size: int):
             return await anyio.to_thread.run_sync(
                 functools.partial(_encode_sync, texts, batch_size=cur_bs)
             )
-        except RuntimeError as e:
+        except Exception as e:
             msg = str(e).lower()
-            if "out of memory" not in msg and "cuda" not in msg:
+            if ("out of memory" not in msg) and ("cuda" not in msg) and ("acceleratorerror" not in msg):
                 raise
             _cleanup_cuda()
             if cur_bs <= 1:
@@ -116,6 +116,13 @@ async def _encode_with_retry(texts: List[str], *, batch_size: int):
 async def startup_event():
     global model_instance
     device = os.getenv("EMBED_DEVICE", "cuda")
+    mem_frac = float(os.getenv("EMBED_CUDA_MEM_FRACTION", "0.9"))
+    if torch.cuda.is_available() and device.startswith("cuda"):
+        try:
+            torch.cuda.set_per_process_memory_fraction(mem_frac)
+            print(f"[EmbeddingServer] cuda mem fraction={mem_frac}")
+        except Exception as e:
+            print(f"[EmbeddingServer] cuda mem fraction set failed: {e}")
     print(f"🚀 [EmbeddingServer] loading model={GRAPHRAG_EMBEDDING_MODEL} device={device}")
     model_instance = SentenceTransformer(GRAPHRAG_EMBEDDING_MODEL, device=device)
     print("✅ [EmbeddingServer] model ready")

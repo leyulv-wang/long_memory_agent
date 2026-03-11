@@ -50,15 +50,13 @@ WHERE $anchor_keyword IS NOT NULL
   AND toLower(anchor.name) CONTAINS toLower($anchor_keyword)
 WITH u, anchor, ra,
      coalesce(
-       ra.event_step,
-       ra.eventstep,
        CASE
-         WHEN coalesce(ra.virtual_time, ra.virtualtime, '') STARTS WITH 'TURN'
-         THEN toInteger(replace(coalesce(ra.virtual_time, ra.virtualtime, ''), 'TURN', ''))
+         WHEN coalesce(ra.virtual_time, '') STARTS WITH 'TURN'
+         THEN toInteger(replace(coalesce(ra.virtual_time, ''), 'TURN', ''))
        END,
        CASE
-         WHEN coalesce(ra.event_timestamp, ra.eventtimestamp, '') =~ '\\d{4}-\\d{2}-\\d{2}.*'
-         THEN date(left(coalesce(ra.event_timestamp, ra.eventtimestamp, ''), 10)).epochDays
+         WHEN coalesce(ra.event_timestamp, '') =~ '\\d{4}-\\d{2}-\\d{2}.*'
+         THEN date(left(coalesce(ra.event_timestamp, ''), 10)).epochDays
        END
      ) AS anchor_order
 WHERE anchor_order IS NOT NULL
@@ -69,18 +67,16 @@ LIMIT 1
 MATCH (u)-[r:EXPERIENCED|RECEIVED|PERFORMED]->(e:Event)
 WITH u, r, e, anchor_order,
      coalesce(
-       r.event_step,
-       r.eventstep,
        CASE
-         WHEN coalesce(r.virtual_time, r.virtualtime, '') STARTS WITH 'TURN'
-         THEN toInteger(replace(coalesce(r.virtual_time, r.virtualtime, ''), 'TURN', ''))
+         WHEN coalesce(r.virtual_time, '') STARTS WITH 'TURN'
+         THEN toInteger(replace(coalesce(r.virtual_time, ''), 'TURN', ''))
        END,
        CASE
-         WHEN coalesce(r.event_timestamp, r.eventtimestamp, '') =~ '\\d{4}-\\d{2}-\\d{2}.*'
-         THEN date(left(coalesce(r.event_timestamp, r.eventtimestamp, ''), 10)).epochDays
+         WHEN coalesce(r.event_timestamp, '') =~ '\\d{4}-\\d{2}-\\d{2}.*'
+         THEN date(left(coalesce(r.event_timestamp, ''), 10)).epochDays
        END
      ) AS e_order,
-     coalesce(r.event_timestamp, r.eventtimestamp, r.virtual_time, r.virtualtime, 'unknown') AS event_time
+     coalesce(r.event_timestamp, r.virtual_time, 'unknown') AS event_time
 WITH u, r, e, anchor_order, e_order, event_time
 WHERE e_order IS NOT NULL AND e_order > anchor_order
 
@@ -99,10 +95,10 @@ RETURN
   type(r) AS rel,
   e.name AS tgt,
   event_time AS event_time,
-  coalesce(r.source_of_belief, r.sourceofbelief, 'ground_truth') AS source_of_belief,
+  coalesce(r.source_of_belief, 'ground_truth') AS source_of_belief,
   coalesce(r.confidence, 1.0) AS confidence,
-  coalesce(r.knowledge_type, r.knowledgetype, 'observed_fact') AS knowledge_type,
-  coalesce(r.evidence_source_unit, r.evidencesourceunit, 'unknown') AS evidence_source_unit
+  coalesce(r.knowledge_type, 'observed_fact') AS knowledge_type,
+  coalesce(r.evidence_source_unit, 'unknown') AS evidence_source_unit
 ORDER BY issue_rank ASC, e_order ASC
 LIMIT 1
 """
@@ -121,15 +117,13 @@ WHERE NOT 'TextUnit' IN labels(t)
         OR toLower(type(r)) CONTAINS toLower(k)
   )
 WITH t, r,
-     coalesce(r.event_timestamp, r.eventtimestamp, r.virtual_time, r.virtualtime, 'unknown') AS event_time,
+     coalesce(r.event_timestamp, r.virtual_time, 'unknown') AS event_time,
      coalesce(
-       r.event_step,
-       r.eventstep,
-       CASE WHEN coalesce(r.virtual_time, r.virtualtime, '') STARTS WITH 'TURN'
-            THEN toInteger(replace(coalesce(r.virtual_time, r.virtualtime, ''), 'TURN', ''))
+       CASE WHEN coalesce(r.virtual_time, '') STARTS WITH 'TURN'
+            THEN toInteger(replace(coalesce(r.virtual_time, ''), 'TURN', ''))
        END,
-       CASE WHEN coalesce(r.event_timestamp, r.eventtimestamp, '') =~ '\\d{{4}}-\\d{{2}}-\\d{{2}}.*'
-            THEN date(left(coalesce(r.event_timestamp, r.eventtimestamp, ''), 10)).epochDays
+       CASE WHEN coalesce(r.event_timestamp, '') =~ '\\d{{4}}-\\d{{2}}-\\d{{2}}.*'
+            THEN date(left(coalesce(r.event_timestamp, ''), 10)).epochDays
        END
      ) AS order_key
 RETURN
@@ -137,10 +131,10 @@ RETURN
   type(r) AS rel,
   coalesce(event_time, 'unknown') AS tgt,
   event_time AS event_time,
-  coalesce(r.source_of_belief, r.sourceofbelief, 'ground_truth') AS source_of_belief,
+  coalesce(r.source_of_belief, 'ground_truth') AS source_of_belief,
   coalesce(r.confidence, 1.0) AS confidence,
-  coalesce(r.knowledge_type, r.knowledgetype, 'observed_fact') AS knowledge_type,
-  coalesce(r.evidence_source_unit, r.evidencesourceunit, 'unknown') AS evidence_source_unit
+  coalesce(r.knowledge_type, 'observed_fact') AS knowledge_type,
+  coalesce(r.evidence_source_unit, 'unknown') AS evidence_source_unit
 ORDER BY order_key ASC
 LIMIT $limit_val
 """
@@ -178,10 +172,10 @@ RETURN
   u.name AS src,
   type(r) AS rel,
   t.name AS tgt,
-  coalesce(r.source_of_belief, r.sourceofbelief, 'ground_truth') AS source_of_belief,
+  coalesce(r.source_of_belief, 'ground_truth') AS source_of_belief,
   coalesce(r.confidence, 1.0) AS confidence,
-  coalesce(r.knowledge_type, r.knowledgetype, 'observed_fact') AS knowledge_type,
-  coalesce(r.evidence_source_unit, r.evidencesourceunit, 'unknown') AS evidence_source_unit,
-  coalesce(r.event_timestamp, r.eventtimestamp, r.virtual_time, r.virtualtime, 'unknown') AS event_time
+  coalesce(r.knowledge_type, 'observed_fact') AS knowledge_type,
+  coalesce(r.evidence_source_unit, 'unknown') AS evidence_source_unit,
+  coalesce(r.event_timestamp, r.virtual_time, 'unknown') AS event_time
 LIMIT $limit_val
 """

@@ -8,6 +8,8 @@ import json
 import re
 import time
 
+from config import CONSOLIDATED_REL_CONFIDENCE, CONSOLIDATED_ASSERTS_CONFIDENCE
+
 logger = logging.getLogger(__name__)
 _DEBUG_LTSS = os.getenv("DEBUG_LTSS", "0") == "1" or os.getenv("DEBUG_PIPELINE", "0") == "1"
 _UPDATE_REL_TYPES = {
@@ -19,6 +21,14 @@ _UPDATE_REL_TYPES = {
     "HAS_STATUS",
     "HAS_PHONE",
     "HAS_EMAIL",
+}
+
+# 事件型关系：保留最早的 turn_id（因为事件只发生一次，后续提到的都是回忆）
+_EVENT_REL_TYPES = {
+    "PARTICIPATED_IN",
+    "ATTENDED",
+    "WITNESSED",
+    "EXPERIENCED",
 }
 
 # 兼容 TURN_12 / TURN12 / TURN_001
@@ -57,6 +67,128 @@ def _safe_ident(s: Any, default: str) -> str:
     return default
 
 
+def _validate_structured_response(structured_response) -> Dict[str, int]:
+    """
+    Lightweight guard before writing to Neo4j.
+    Drops invalid nodes/relationships/claims and normalizes empty fields.
+    """
+    stats = {
+        "nodes_dropped": 0,
+        "rels_dropped": 0,
+        "claims_dropped": 0,
+        "facts_dropped": 0,
+        "insights_dropped": 0,
+    }
+    if not structured_response:
+        return stats
+
+    # Nodes
+    cleaned_nodes = []
+    for n in getattr(structured_response, "nodes", []) or []:
+        name = str(getattr(n, "name", "") or "").strip()
+        if not name:
+            stats["nodes_dropped"] += 1
+            continue
+        label = getattr(n, "label", None)
+        if not isinstance(label, str) or not label.strip():
+            try:
+                setattr(n, "label", "Concept")
+            except Exception:
+                pass
+        props = getattr(n, "properties", None)
+        if not isinstance(props, dict):
+            try:
+                setattr(n, "properties", {})
+            except Exception:
+                pass
+        cleaned_nodes.append(n)
+    try:
+        structured_response.nodes = cleaned_nodes
+    except Exception:
+        pass
+
+    # Relationships
+    cleaned_rels = []
+    for r in getattr(structured_response, "relationships", []) or []:
+        rel_type = str(getattr(r, "type", "") or "").strip()
+        s_name = str(getattr(r, "source_node_name", "") or "").strip()
+        t_name = str(getattr(r, "target_node_name", "") or "").strip()
+        if not (rel_type and s_name and t_name):
+            stats["rels_dropped"] += 1
+            continue
+        s_label = getattr(r, "source_node_label", None)
+        if not isinstance(s_label, str) or not s_label.strip():
+            try:
+                setattr(r, "source_node_label", "Concept")
+            except Exception:
+                pass
+        t_label = getattr(r, "target_node_label", None)
+        if not isinstance(t_label, str) or not t_label.strip():
+            try:
+                setattr(r, "target_node_label", "Concept")
+            except Exception:
+                pass
+        props = getattr(r, "properties", None)
+        if not isinstance(props, dict):
+            try:
+                setattr(r, "properties", {})
+            except Exception:
+                pass
+        cleaned_rels.append(r)
+    try:
+        structured_response.relationships = cleaned_rels
+    except Exception:
+        pass
+
+    # Claims
+    cleaned_claims = []
+    for c in getattr(structured_response, "claims", []) or []:
+        c_dict = c.model_dump() if hasattr(c, "model_dump") else (c if isinstance(c, dict) else None)
+        if not isinstance(c_dict, dict):
+            stats["claims_dropped"] += 1
+            continue
+        text = str(c_dict.get("text") or "").strip()
+        if not text:
+            stats["claims_dropped"] += 1
+            continue
+        c_dict["text"] = text
+        if c_dict.get("event_turn_offset") is not None:
+            try:
+                c_dict["event_turn_offset"] = int(float(c_dict.get("event_turn_offset")))
+            except Exception:
+                c_dict["event_turn_offset"] = None
+        cleaned_claims.append(c_dict)
+    try:
+        structured_response.claims = cleaned_claims
+    except Exception:
+        pass
+
+    # Facts / insights
+    cleaned_facts = []
+    for f in getattr(structured_response, "facts", []) or []:
+        if isinstance(f, str) and f.strip():
+            cleaned_facts.append(f.strip())
+        else:
+            stats["facts_dropped"] += 1
+    try:
+        structured_response.facts = cleaned_facts
+    except Exception:
+        pass
+
+    cleaned_insights = []
+    for ins in getattr(structured_response, "insights", []) or []:
+        if isinstance(ins, str) and ins.strip():
+            cleaned_insights.append(ins.strip())
+        else:
+            stats["insights_dropped"] += 1
+    try:
+        structured_response.insights = cleaned_insights
+    except Exception:
+        pass
+
+    return stats
+
+
 def serialize_props(props: Dict[str, Any]) -> Dict[str, Any]:
     """
     Neo4j 属性不接受 dict；list 里如果有 dict/复杂对象也会失败；
@@ -92,6 +224,75 @@ def _make_event_id(agent_name: str, channel: str, virtual_time: str, event_times
     if et and et.lower() != "unknown":
         return f"evt:{ch}:{agent}:{et}"
     return f"evt:{ch}:{agent}:{vt}:{evidence_unit}"
+
+
+# ----------------------------
+# 实体消歧（Entity Disambiguation）
+# ----------------------------
+# 常见别名映射（可扩展）
+_ENTITY_ALIASES = {
+    # 人称代词 -> 统一
+    "i": "User",
+    "me": "User",
+    "my": "User",
+    "myself": "User",
+    "we": "User",
+    "us": "User",
+    "our": "User",
+    # 常见缩写
+    "nyc": "New York City",
+    "la": "Los Angeles",
+    "sf": "San Francisco",
+    "uk": "United Kingdom",
+    "usa": "United States",
+    "us": "United States",
+}
+
+# 需要保持原样的实体（不做标准化）
+_PRESERVE_CASE_PATTERNS = [
+    r"^[A-Z]{2,}$",  # 全大写缩写如 NASA, FBI
+    r"^[A-Z][a-z]+[A-Z]",  # 驼峰如 iPhone, eBay
+]
+
+
+def normalize_entity_name(name: str, *, preserve_case: bool = False) -> str:
+    """
+    实体名称标准化/消歧：
+    1. 去除首尾空格和多余空格
+    2. 别名映射
+    3. 标题化（首字母大写）
+    """
+    if not isinstance(name, str):
+        return str(name or "").strip()
+    
+    s = " ".join(name.split()).strip()
+    if not s:
+        return s
+    
+    # 检查别名映射
+    s_lower = s.lower()
+    if s_lower in _ENTITY_ALIASES:
+        return _ENTITY_ALIASES[s_lower]
+    
+    # 检查是否需要保持原样
+    import re
+    for pattern in _PRESERVE_CASE_PATTERNS:
+        if re.match(pattern, s):
+            return s
+    
+    # 标题化（但保留全大写词）
+    if preserve_case:
+        return s
+    
+    words = s.split()
+    result = []
+    for w in words:
+        if w.isupper() and len(w) > 1:
+            result.append(w)  # 保留全大写
+        else:
+            result.append(w.capitalize())
+    
+    return " ".join(result)
 
 
 # ----------------------------
@@ -283,6 +484,12 @@ def write_consolidation_result(
         logger.warning("[ltss_writer] LTSS 不可用，跳过写入数据库。")
         return
 
+    # 确保 embedding_model 可用
+    if embedding_model is None:
+        from utils.embedding import get_embedding_model
+        embedding_model = get_embedding_model()
+        logger.info(f"[ltss_writer] embedding_model was None, loaded: {type(embedding_model).__name__}")
+
     agent_name_log_prefix = f"[智能体 '{agent_name}' 的记忆巩固引擎]"
     real_timestamp = datetime.datetime.now().isoformat()
 
@@ -305,8 +512,19 @@ def write_consolidation_result(
             f"[ltss_writer][debug] structured nodes={len(getattr(structured_response, 'nodes', []) or [])} "
             f"rels={len(getattr(structured_response, 'relationships', []) or [])} "
             f"facts={len(getattr(structured_response, 'facts', []) or [])} "
-            f"insights={len(getattr(structured_response, 'insights', []) or [])}"
+            f"insights={len(getattr(structured_response, 'insights', []) or [])} "
+            f"claims={len(getattr(structured_response, 'claims', []) or [])}"
         )
+
+    validate_stats = _validate_structured_response(structured_response)
+    strict_validation = os.getenv("STRICT_WRITE_VALIDATION", "0").strip() in ("1", "true", "yes")
+    if (strict_validation or _DEBUG_LTSS) and any(v > 0 for v in validate_stats.values()):
+        logger.info(
+            "[ltss_writer][debug] validate_drops "
+            + ", ".join([f"{k}={v}" for k, v in validate_stats.items() if v])
+        )
+        if strict_validation:
+            raise ValueError(f"[ltss_writer] strict validation failed: {validate_stats}")
 
     # 当前写入发生的 turn（recorded）
     recorded_turn_id = _parse_turn_id(virtual_timestamp)
@@ -322,7 +540,12 @@ def write_consolidation_result(
             _emb_calls += 1
             _emb_total_s += _dt
             _emb_tu_s += _dt
-            logger.info(f"[ltss_writer][embed] mode=single kind=textunit n=1 sec={_dt:.3f}")
+            # 验证 embedding 是否有效
+            if tu_emb and len(tu_emb) > 0:
+                logger.info(f"[ltss_writer][embed] mode=single kind=textunit n=1 sec={_dt:.3f} dim={len(tu_emb)}")
+            else:
+                logger.warning(f"[ltss_writer][embed] TextUnit embedding returned empty! sec={_dt:.3f}")
+                tu_emb = None
         except Exception as e:
             logger.warning(f"{agent_name_log_prefix} TextUnit embedding failed: {e}")
             tu_emb = None
@@ -377,6 +600,11 @@ def write_consolidation_result(
         for node in structured_response.nodes:
             nlabel = _safe_ident(getattr(node, "label", None) or "Concept", "Concept")
             nname = str(getattr(node, "name", "") or "").strip()
+            if not nname:
+                continue
+
+            # ✅ 实体消歧：标准化实体名称
+            nname = normalize_entity_name(nname)
             if not nname:
                 continue
 
@@ -468,34 +696,180 @@ MERGE (c)-[:HAS_ENTITY]->(e)
                 ltss.update_graph(cy_link, parameters={"rows": rows, "chunk_id": chunk_id})
 
     # ----------------------------
-    # C1) Facts / Insights（strings）→ Property-as-edge
+    # C1) Facts / Insights / Claims → Property-as-edge
     # ----------------------------
     props_edge_rows = []
 
+    def _push_prop_fact(
+        label: str,
+        text: str,
+        *,
+        confidence: float,
+        knowledge_type: str,
+        source_of_belief: str,
+        event_time_text: Optional[str] = None,
+        event_turn_offset: Optional[int] = None,
+        event_timestamp: Optional[str] = None,
+    ) -> None:
+        s = (text or "").strip()
+        if not s:
+            return
+        capped_conf = float(confidence)
+        if label == "Fact":
+            try:
+                capped_conf = min(capped_conf, float(CONSOLIDATED_ASSERTS_CONFIDENCE))
+            except Exception:
+                capped_conf = float(CONSOLIDATED_ASSERTS_CONFIDENCE)
+
+        props_edge_rows.append(
+            {
+                "label": label,
+                "text": s,
+                "confidence": float(capped_conf),
+                "knowledge_type": knowledge_type,
+                "source_of_belief": source_of_belief,
+                "event_time_text": event_time_text,
+                "event_turn_offset": event_turn_offset,
+                "event_timestamp": event_timestamp,
+            }
+        )
+
+    # Claims (structured objects from LLM schema)
+    claims = getattr(structured_response, "claims", None)
+    if isinstance(claims, list):
+        for c in claims:
+            if hasattr(c, "model_dump"):
+                c = c.model_dump()
+            if not isinstance(c, dict):
+                continue
+            event_time_text = c.get("event_time_text")
+            _push_prop_fact(
+                "Fact",
+                c.get("text", ""),
+                confidence=float(c.get("confidence", 0.9)),
+                knowledge_type=str(c.get("knowledge_type") or "observed_fact"),
+                source_of_belief=str(c.get("source_of_belief") or "user_statement"),
+                event_time_text=event_time_text,
+                event_turn_offset=c.get("event_turn_offset"),
+                event_timestamp=(session_time_iso or None) if not event_time_text else None,
+            )
+
+    # Backward compatible facts/insights (strings)
     if getattr(structured_response, "facts", None):
         for fact in structured_response.facts:
-            if not isinstance(fact, str) or not fact.strip():
+            # 支持多种格式：
+            # 1. 字符串 "fact text"
+            # 2. 带来源前缀 "[user] fact text" 或 "[assistant] fact text"
+            # 3. JSON 编码的字典 '{"text": "...", "source": "user/assistant", "event_time": "YYYY-MM-DD"}'
+            fact_event_time = None  # LLM 计算的事件时间
+            
+            if isinstance(fact, str):
+                fact_text = fact
+                fact_source = "user"  # 默认来源
+                
+                # 尝试解析 JSON 格式
+                if fact_text.startswith("{") and fact_text.endswith("}"):
+                    try:
+                        fact_obj = json.loads(fact_text)
+                        fact_text = fact_obj.get("text", "")
+                        fact_source = fact_obj.get("source", "user")
+                        fact_event_time = fact_obj.get("event_time", "")
+                    except json.JSONDecodeError:
+                        pass  # 不是有效的 JSON，当作普通字符串处理
+                
+                # 解析 [source] 前缀
+                if fact_text.startswith("[user]"):
+                    fact_text = fact_text[6:].strip()
+                    fact_source = "user"
+                elif fact_text.startswith("[assistant]"):
+                    fact_text = fact_text[11:].strip()
+                    fact_source = "assistant"
+            elif isinstance(fact, dict):
+                fact_text = fact.get("text", "")
+                fact_source = fact.get("source", "user")
+                fact_event_time = fact.get("event_time", "")  # ✅ 获取 LLM 计算的事件时间
+            else:
                 continue
-            props_edge_rows.append(("Fact", fact.strip(), 1.0))
+            
+            if not fact_text:
+                continue
+            
+            # ✅ 使用 LLM 计算的 event_time，如果没有则使用 session_time
+            final_event_timestamp = fact_event_time if fact_event_time else (session_time_iso or None)
+            
+            _push_prop_fact(
+                "Fact",
+                fact_text,
+                confidence=1.0,
+                knowledge_type="observed_fact",
+                source_of_belief=fact_source,  # ✅ 使用 source 字段区分来源
+                event_timestamp=final_event_timestamp,
+            )
 
     if getattr(structured_response, "insights", None):
         for ins in structured_response.insights:
-            if not isinstance(ins, str) or not ins.strip():
+            if not isinstance(ins, str):
                 continue
-            props_edge_rows.append(("Insight", ins.strip(), 0.9))
+            _push_prop_fact(
+                "Insight",
+                ins,
+                confidence=0.9,
+                knowledge_type="logical_inference",
+                source_of_belief="reflection",
+                event_timestamp=session_time_iso or None,
+            )
 
     if props_edge_rows:
         batch = []
-        for lbl, text, conf in props_edge_rows:
+        
+        # ✅ 为简单事实生成 embedding（批量处理，分批避免 API 限制）
+        fact_texts = [row["text"] for row in props_edge_rows if row.get("text")]
+        fact_embeddings: List[Optional[List[float]]] = []
+        
+        # 分批处理，每批最多 60 个（留一些余量，API 限制是 64）
+        BATCH_SIZE = 60
+        
+        if embedding_model and fact_texts:
+            try:
+                _t0 = time.time()
+                all_embeddings = []
+                
+                for i in range(0, len(fact_texts), BATCH_SIZE):
+                    batch_texts = fact_texts[i:i + BATCH_SIZE]
+                    if hasattr(embedding_model, "embed_documents"):
+                        batch_embs = embedding_model.embed_documents(batch_texts) or []
+                    else:
+                        batch_embs = [embedding_model.embed_query(t) for t in batch_texts]
+                    all_embeddings.extend(batch_embs)
+                
+                fact_embeddings = all_embeddings
+                _dt = time.time() - _t0
+                _emb_calls += 1
+                _emb_total_s += _dt
+                
+                # 验证 embedding 是否有效
+                valid_count = sum(1 for e in fact_embeddings if e and len(e) > 0)
+                logger.info(f"[ltss_writer][embed] mode=batch kind=simple_fact n={len(fact_embeddings)} valid={valid_count} sec={_dt:.3f}")
+            except Exception as e:
+                logger.warning(f"[ltss_writer][embed] simple_fact batch failed: {e}")
+                fact_embeddings = []
+        
+        for idx, row in enumerate(props_edge_rows):
+            lbl = row["label"]
+            text = row["text"]
+            conf = row["confidence"]
             s_label = "TextFact"
             t_label = lbl
             s_name = text_unit_id
             t_name = text
+            
+            # ✅ 获取该简单事实的 embedding
+            fact_emb = fact_embeddings[idx] if idx < len(fact_embeddings) else None
 
             props = {
                 "confidence": float(conf),
-                "knowledge_type": "observed_fact" if lbl == "Fact" else "logical_inference",
-                "source_of_belief": "reflection",
+                "knowledge_type": row.get("knowledge_type") or ("observed_fact" if lbl == "Fact" else "logical_inference"),
+                "source_of_belief": row.get("source_of_belief") or "reflection",
                 "consolidated_at": real_timestamp,
                 "virtual_time": virtual_timestamp,
                 "turn_id": recorded_turn_id,
@@ -508,6 +882,13 @@ MERGE (c)-[:HAS_ENTITY]->(e)
                 "should_be_current": True,
                 "source_rank": 1.0,
             }
+            if row.get("event_time_text"):
+                props["event_time_text"] = row.get("event_time_text")
+            if row.get("event_turn_offset") is not None:
+                props["event_turn_offset"] = row.get("event_turn_offset")
+            if row.get("event_timestamp") and str(row.get("event_timestamp")).lower() not in ["", "none", "null", "unknown"]:
+                props["event_timestamp"] = row.get("event_timestamp")
+
             # Ensure TextFact facts don't collapse into one slot during soft-update grouping.
             props["slot_key"] = f"{s_name}:ASSERTS:{t_name}"
 
@@ -518,7 +899,8 @@ MERGE (c)-[:HAS_ENTITY]->(e)
             props["event_id"] = event_id
 
             base_key = f"{s_label}:{s_name}:ASSERTS:{t_label}:{t_name}"
-            props["belief_key"] = f"{channel}:{agent_name}:{base_key}"
+            # 方案A：belief_key 加入 turn_id，每次提及创建独立记录
+            props["belief_key"] = f"{recorded_turn_id}:{channel}:{agent_name}:{base_key}"
 
             batch.append(
                 {
@@ -528,117 +910,18 @@ MERGE (c)-[:HAS_ENTITY]->(e)
                     "t_label": t_label,
                     "type": "ASSERTS",
                     "props": serialize_props(props),
+                    "embedding": fact_emb,  # ✅ 添加 embedding
                 }
             )
 
-        cypher_props_as_edges = """
-UNWIND $batch AS row
-MERGE (source:TextUnit {name: row.s_name})
-MERGE (target:`__Node__` {name: row.t_name})
-SET target._node_type = row.t_label
+        # ✅ 调试：检查 batch 中的 embedding
+        if _DEBUG_LTSS:
+            emb_stats = [len(b.get("embedding") or []) for b in batch]
+            logger.info(f"[ltss_writer][debug] ASSERTS batch size={len(batch)} embedding_sizes={emb_stats[:5]}...")
 
-WITH source, target, row
-MATCH (u:TextUnit {name: row.props.evidence_source_unit})
-MERGE (source)-[:FROM_SOURCE]->(u)
-MERGE (target)-[:FROM_SOURCE]->(u)
-
-WITH source, target, row, row.props AS props
-OPTIONAL MATCH (source)-[old:ASSERTS]->(other)
-WHERE old.belief_key = props.belief_key
-  AND coalesce(old.is_current,false) = true
-
-WITH source, target, old, other, row, props,
-CASE
-  WHEN old IS NULL THEN true
-  WHEN coalesce(props.source_rank, 1.0) > coalesce(old.source_rank, 1.0) THEN true
-  WHEN coalesce(props.source_rank, 1.0) < coalesce(old.source_rank, 1.0) THEN false
-  WHEN coalesce(props.event_step, -1) > coalesce(old.event_step, -1) THEN true
-  WHEN coalesce(props.event_step, -1) < coalesce(old.event_step, -1) THEN false
-  WHEN props.event_timestamp <> 'unknown' AND old.event_timestamp <> 'unknown' AND props.event_timestamp > old.event_timestamp THEN true
-  WHEN coalesce(props.confidence, 0.0) >= coalesce(old.confidence, 0.0) THEN true
-  ELSE false
-END AS new_wins
-
-FOREACH (_ IN CASE WHEN old IS NOT NULL AND new_wins = true AND other.name <> row.t_name THEN [1] ELSE [] END |
-  SET old.is_current = false,
-      old.deprecated_at = props.consolidated_at
-)
-
-MERGE (source)-[r:ASSERTS {belief_key: props.belief_key}]->(target)
-ON CREATE SET
-  r += props,
-  r.created_at = props.consolidated_at,
-  r.is_current = new_wins
-ON MATCH SET
-  r.confidence = CASE WHEN new_wins = true THEN props.confidence ELSE r.confidence END,
-  r.consolidated_at = props.consolidated_at,
-  r.virtual_time = props.virtual_time,
-  r.turn_id = props.turn_id,
-  r.recorded_turn_id = props.recorded_turn_id,
-  r.event_turn_offset = props.event_turn_offset,
-  r.event_turn_id = props.event_turn_id,
-  r.event_step = props.event_step,
-  r.event_timestamp = props.event_timestamp,
-  r.event_id = props.event_id,
-  r.is_current = CASE WHEN new_wins = true THEN true ELSE r.is_current END
-
-// --- Fact + Event ---
-WITH source, target, row, props, r,
-     toString(props.belief_key) AS bk
-
-MERGE (f:Fact {belief_key: bk})
-ON CREATE SET
-  f.type = type(r),
-  f.slot_key = coalesce(props.slot_key, toString(source.name) + ':' + type(r)),
-  f.channel = props.channel,
-  f.agent_name = props.agent_name,
-  f.virtual_time = props.virtual_time,
-  f.turn_id = props.turn_id,
-  f.recorded_turn_id = props.recorded_turn_id,
-  f.event_turn_offset = props.event_turn_offset,
-  f.event_turn_id = props.event_turn_id,
-  f.event_timestamp = props.event_timestamp,
-  f.source_of_belief = props.source_of_belief,
-  f.knowledge_type = props.knowledge_type,
-  f.confidence = props.confidence,
-  f.created_at = props.consolidated_at
-ON MATCH SET
-  f.confidence = CASE
-      WHEN coalesce(props.confidence,0.0) >= coalesce(f.confidence,0.0)
-      THEN props.confidence
-      ELSE f.confidence
-  END,
-  f.slot_key = coalesce(f.slot_key, props.slot_key, toString(source.name) + ':' + type(r)),
-  f.turn_id = props.turn_id,
-  f.recorded_turn_id = props.recorded_turn_id,
-  f.event_turn_offset = props.event_turn_offset,
-  f.event_turn_id = props.event_turn_id,
-  f.virtual_time = props.virtual_time,
-  f.event_timestamp = props.event_timestamp,
-  f.updated_at = props.consolidated_at
-
-MERGE (f)-[:SUBJECT]->(source)
-MERGE (f)-[:OBJECT]->(target)
-
-MERGE (e:Event {event_id: props.event_id})
-SET e.channel = props.channel,
-    e.agent_name = props.agent_name,
-    e.virtual_time = props.virtual_time,
-    e.turn_id = props.turn_id,
-    e.recorded_turn_id = props.recorded_turn_id,
-    e.event_turn_offset = props.event_turn_offset,
-    e.event_turn_id = props.event_turn_id,
-    e.event_timestamp = props.event_timestamp,
-    e.updated_at = props.consolidated_at
-
-MERGE (e)-[:HAS_FACT]->(f)
-WITH e, props
-MATCH (u2:TextUnit {name: props.evidence_source_unit})
-MERGE (e)-[:EVIDENCED_BY]->(u2)
-
-RETURN count(*)
-""".strip()
-        ltss.update_graph(cypher_props_as_edges, parameters={"batch": batch})
+        # 使用模板文件中的 Cypher
+        from memory.cypher_templates import CYPHER_ASSERTS_EDGE
+        ltss.update_graph(CYPHER_ASSERTS_EDGE, parameters={"batch": batch})
 
     # ----------------------------
     # C2) Relationships（structured_response.relationships）
@@ -650,8 +933,24 @@ RETURN count(*)
             props = dict(props or {})
 
             extracted_time = props.get("event_timestamp")
+            # ✅ 时间戳标准化：如果LLM提取的是相对时间（today/yesterday等），用session_time_iso替换
             if extracted_time and str(extracted_time).lower() not in ["", "none", "null", "unknown"]:
-                final_event_time = extracted_time
+                extracted_lower = str(extracted_time).lower().strip()
+                # 检测相对时间词
+                relative_time_words = ["today", "yesterday", "tomorrow", "now", "just", "recently", 
+                                       "last week", "this week", "last month", "this month"]
+                is_relative = any(word in extracted_lower for word in relative_time_words)
+                
+                if is_relative and session_time_iso:
+                    # 相对时间 -> 用session的绝对时间
+                    final_event_time = session_time_iso
+                    if _DEBUG_LTSS:
+                        logger.info(f"[ltss_writer][time_normalize] '{extracted_time}' -> '{session_time_iso}'")
+                else:
+                    final_event_time = extracted_time
+            elif session_time_iso:
+                # 没有提取到时间，用session时间作为默认值
+                final_event_time = session_time_iso
             else:
                 final_event_time = "unknown"
 
@@ -664,11 +963,17 @@ RETURN count(*)
             if not s_name or not t_name:
                 continue
 
+            # ✅ 实体消歧：标准化实体名称
+            s_name = normalize_entity_name(s_name)
+            t_name = normalize_entity_name(t_name)
+            if not s_name or not t_name:
+                continue
+
             source_of_belief = props.get("source_of_belief", "reflection")
             try:
-                props["confidence"] = float(props.get("confidence", 0.9))
+                props["confidence"] = float(props.get("confidence", CONSOLIDATED_REL_CONFIDENCE))
             except Exception:
-                props["confidence"] = 0.9
+                props["confidence"] = float(CONSOLIDATED_REL_CONFIDENCE)
 
             if "slot_key" not in props and rel_type in _UPDATE_REL_TYPES:
                 props["slot_key"] = f"{s_label}:{s_name}:{rel_type}"
@@ -694,11 +999,27 @@ RETURN count(*)
                     "source_rank": 2.0 if source_of_belief == "ground_truth" else 1.0,
                     "agent_name": agent_name,
                     "channel": channel,
+                    # 添加 session_time 字段（对话发生时间）
+                    "session_time": session_time_iso or session_time_raw or None,
                 }
             )
 
             base_key = f"{s_label}:{s_name}:{rel_type}:{t_label}:{t_name}"
-            props["belief_key"] = f"{channel}:{agent_name}:{base_key}"
+            # 方案A：belief_key 加入 turn_id，每次提及创建独立记录
+            # 这样同一事实在不同 turn 提及会创建不同的 Fact 节点，避免信息丢失
+            props["belief_key"] = f"{recorded_turn_id}:{channel}:{agent_name}:{base_key}"
+            
+            # ✅ 生成简单事实文本（自然语言）
+            from utils.consolidated_extractor import _relationship_to_natural_language
+            fact_text = _relationship_to_natural_language(
+                source=s_name,
+                target=t_name,
+                rel_type=rel_type,
+                source_type=s_label,
+                target_type=t_label,
+                description=props.get("description", ""),
+            )
+            props["text"] = fact_text  # 添加简单事实文本
 
             rels_to_write.append(
                 {
@@ -720,110 +1041,9 @@ RETURN count(*)
             t_label_safe = _safe_ident(t_label, "Concept")
             rel_type_safe = _safe_ident(rel_type, "RELATED_TO")
 
-            cypher_rels = f"""
-UNWIND $batch AS row
-MERGE (source:`{s_label_safe}` {{name: row.s_name}})
-MERGE (target:`{t_label_safe}` {{name: row.t_name}})
-WITH source, target, row
-MATCH (u:TextUnit {{name: row.props.evidence_source_unit}})
-MERGE (source)-[:FROM_SOURCE]->(u)
-MERGE (target)-[:FROM_SOURCE]->(u)
-
-WITH source, target, row, row.props AS props
-OPTIONAL MATCH (source)-[old:`{rel_type_safe}`]->(other)
-WHERE old.belief_key = props.belief_key
-  AND coalesce(old.is_current,false) = true
-
-WITH source, target, old, other, row, props,
-CASE
-  WHEN old IS NULL THEN true
-  WHEN coalesce(props.source_rank, 1.0) > coalesce(old.source_rank, 1.0) THEN true
-  WHEN coalesce(props.source_rank, 1.0) < coalesce(old.source_rank, 1.0) THEN false
-  WHEN coalesce(props.event_step, -1) > coalesce(old.event_step, -1) THEN true
-  WHEN coalesce(props.event_step, -1) < coalesce(old.event_step, -1) THEN false
-  WHEN props.event_timestamp <> 'unknown' AND old.event_timestamp <> 'unknown' AND props.event_timestamp > old.event_timestamp THEN true
-  WHEN coalesce(props.confidence, 0.0) >= coalesce(old.confidence, 0.0) THEN true
-  ELSE false
-END AS new_wins
-
-FOREACH (_ IN CASE WHEN old IS NOT NULL AND new_wins = true AND other.name <> row.t_name THEN [1] ELSE [] END |
-  SET old.is_current = false,
-      old.deprecated_at = props.consolidated_at
-)
-
-MERGE (source)-[r:`{rel_type_safe}` {{belief_key: props.belief_key}}]->(target)
-ON CREATE SET
-  r += props,
-  r.created_at = props.consolidated_at,
-  r.is_current = new_wins
-ON MATCH SET
-  r.confidence = CASE WHEN new_wins = true THEN props.confidence ELSE r.confidence END,
-  r.consolidated_at = props.consolidated_at,
-  r.virtual_time = props.virtual_time,
-  r.turn_id = props.turn_id,
-  r.recorded_turn_id = props.recorded_turn_id,
-  r.event_turn_offset = props.event_turn_offset,
-  r.event_turn_id = props.event_turn_id,
-  r.event_step = props.event_step,
-  r.event_timestamp = props.event_timestamp,
-  r.event_id = props.event_id,
-  r.is_current = CASE WHEN new_wins = true THEN true ELSE r.is_current END
-
-WITH source, target, row, props, r,
-     toString(props.belief_key) AS bk
-
-MERGE (f:Fact {{belief_key: bk}})
-ON CREATE SET
-  f.type = type(r),
-  f.slot_key = coalesce(props.slot_key, toString(source.name) + ':' + type(r)),
-  f.channel = props.channel,
-  f.agent_name = props.agent_name,
-  f.virtual_time = props.virtual_time,
-  f.turn_id = props.turn_id,
-  f.recorded_turn_id = props.recorded_turn_id,
-  f.event_turn_offset = props.event_turn_offset,
-  f.event_turn_id = props.event_turn_id,
-  f.event_timestamp = props.event_timestamp,
-  f.source_of_belief = props.source_of_belief,
-  f.knowledge_type = props.knowledge_type,
-  f.confidence = props.confidence,
-  f.created_at = props.consolidated_at
-ON MATCH SET
-  f.confidence = CASE
-      WHEN coalesce(props.confidence,0.0) >= coalesce(f.confidence,0.0)
-      THEN props.confidence
-      ELSE f.confidence
-  END,
-  f.slot_key = coalesce(f.slot_key, props.slot_key, toString(source.name) + ':' + type(r)),
-  f.turn_id = props.turn_id,
-  f.recorded_turn_id = props.recorded_turn_id,
-  f.event_turn_offset = props.event_turn_offset,
-  f.event_turn_id = props.event_turn_id,
-  f.virtual_time = props.virtual_time,
-  f.event_timestamp = props.event_timestamp,
-  f.updated_at = props.consolidated_at
-
-MERGE (f)-[:SUBJECT]->(source)
-MERGE (f)-[:OBJECT]->(target)
-
-MERGE (e:Event {{event_id: props.event_id}})
-SET e.channel = props.channel,
-    e.agent_name = props.agent_name,
-    e.virtual_time = props.virtual_time,
-    e.turn_id = props.turn_id,
-    e.recorded_turn_id = props.recorded_turn_id,
-    e.event_turn_offset = props.event_turn_offset,
-    e.event_turn_id = props.event_turn_id,
-    e.event_timestamp = props.event_timestamp,
-    e.updated_at = props.consolidated_at
-
-MERGE (e)-[:HAS_FACT]->(f)
-WITH e, props
-MATCH (u2:TextUnit {{name: props.evidence_source_unit}})
-MERGE (e)-[:EVIDENCED_BY]->(u2)
-
-RETURN count(*)
-""".strip()
+            # 使用模板文件中的 Cypher
+            from memory.cypher_templates import cypher_upsert_relationship
+            cypher_rels = cypher_upsert_relationship(s_label_safe, t_label_safe, rel_type_safe)
             ltss.update_graph(cypher_rels, parameters={"batch": batch, "agent_name": agent_name, "channel": channel})
 
     # --- embedding profiling summary ---

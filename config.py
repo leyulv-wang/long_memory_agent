@@ -17,6 +17,7 @@ CHARACTER_BOOKS_DIR = os.path.join(DATA_DIR, "books") # 【新增】角色书的
 
 # 从 .env 文件加载环境变量
 load_dotenv()
+_USE_AURA = os.getenv("USE_NEO4J_AURA", "0").strip().lower() in ("1", "true", "yes")
 
 # --- LLM 与嵌入模型配置 ---
 GRAPHRAG_API_BASE = os.getenv("GRAPHRAG_API_BASE")
@@ -27,9 +28,17 @@ GRAPHRAG_EMBEDDING_API_BASE = os.getenv("GRAPHRAG_EMBEDDING_API_BASE")
 GRAPHRAG_EMBEDDING_API_KEY = os.getenv("GRAPHRAG_EMBEDDING_API_KEY")
 GRAPHRAG_EMBEDDING_MODEL = os.getenv("GRAPHRAG_EMBEDDING_MODEL")
 
-#这个是便宜的，用这个
+#这个是便宜的，用这个（可按实例选择不同 key）
 CHEAP_GRAPHRAG_API_BASE = os.getenv("CHEAP_GRAPHRAG_API_BASE")
-CHEAP_GRAPHRAG_CHAT_API_KEY = os.getenv("CHEAP_GRAPHRAG_CHAT_API_KEY")
+_CHEAP_KEY_SLOT = (os.getenv("CHEAP_GRAPHRAG_CHAT_API_KEY_SLOT") or "").strip().lower()
+if not _CHEAP_KEY_SLOT:
+    _CHEAP_KEY_SLOT = "b" if _USE_AURA else "a"
+if _CHEAP_KEY_SLOT in ("a", "1", "slot1"):
+    CHEAP_GRAPHRAG_CHAT_API_KEY = os.getenv("CHEAP_GRAPHRAG_CHAT_API_KEY_A") or os.getenv("CHEAP_GRAPHRAG_CHAT_API_KEY")
+elif _CHEAP_KEY_SLOT in ("b", "2", "slot2"):
+    CHEAP_GRAPHRAG_CHAT_API_KEY = os.getenv("CHEAP_GRAPHRAG_CHAT_API_KEY_B") or os.getenv("CHEAP_GRAPHRAG_CHAT_API_KEY")
+else:
+    CHEAP_GRAPHRAG_CHAT_API_KEY = os.getenv("CHEAP_GRAPHRAG_CHAT_API_KEY")
 CHEAP_GRAPHRAG_CHAT_MODEL = os.getenv("CHEAP_GRAPHRAG_CHAT_MODEL")
 
 # --- LlamaIndex (KG ingestion) 配置：沿用你现有 OpenAI-compatible 变量 ---
@@ -65,9 +74,15 @@ VECTOR_DIM_FALLBACK = 1024
 
 
 # --- 长期记忆 (Neo4j) 配置 ---
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+# 可选：使用 Aura 连接（需要显式开启）
+if _USE_AURA and os.getenv("NEO4J_AURA_URI"):
+    NEO4J_URI = os.getenv("NEO4J_AURA_URI")
+    NEO4J_USERNAME = os.getenv("NEO4J_AURA_USERNAME", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_AURA_PASSWORD")
+else:
+    NEO4J_URI = os.getenv("NEO4J_URI")
+    NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 # --- 短期记忆 (FAISS) 配置 ---
 # 【修改】旧的全局 FAISS_INDEX_PATH 已不再需要，因为每个智能体都有自己的路径。
@@ -80,9 +95,28 @@ memory_consolidation_threshold = 10#阈值
 
 related_memories = 12#和阈值数量的短期记忆抽象出来的主题相关的短期记忆，比阈值大一点，因为有可能检索出来的相关记忆里很多和最近的阈值数量的那几条记忆重复了
 short_memory_number = 10#构建上下文，CFF中的短期记忆数量
-long_memory_number = 10#构建上下文，CFF中的长期记忆数量，长期记忆数据库中检索旧的信念的数量
+long_memory_number = 20#构建上下文，CFF中的长期记忆数量，长期记忆数据库中检索旧的信念的数量
 # 【新增】短期记忆窗口大小
 SHORT_TERM_MEMORY_WINDOW = int(os.getenv("SHORT_TERM_MEMORY_WINDOW", 50))
+
+# --- Evidence filtering level ---
+# strict: enforce explicit visit patterns and negative filters + keyword filtering
+# medium: enforce explicit visit patterns and negative filters (no keyword filtering)
+# lenient: keep broader evidence (for recall on large noisy datasets)
+EVIDENCE_FILTER_LEVEL = os.getenv("EVIDENCE_FILTER_LEVEL", "lenient").strip().lower()
+# --- Evidence fallback scope ---
+# off: disable wide TextUnit fallback
+# order: enable for order/list/temporal questions
+# always: enable for any question
+EVIDENCE_TEXTUNIT_FALLBACK_SCOPE = os.getenv("EVIDENCE_TEXTUNIT_FALLBACK_SCOPE", "order").strip().lower()
+
+# --- Confidence defaults ---
+# Raw relations (LlamaIndex ingestion) default confidence
+RAW_REL_CONFIDENCE = float(os.getenv("RAW_REL_CONFIDENCE", "0.95"))
+# Consolidated structured relationships default confidence (when missing)
+CONSOLIDATED_REL_CONFIDENCE = float(os.getenv("CONSOLIDATED_REL_CONFIDENCE", "0.85"))
+# Consolidated ASSERTS (TextFact) confidence cap to reduce dominance
+CONSOLIDATED_ASSERTS_CONFIDENCE = float(os.getenv("CONSOLIDATED_ASSERTS_CONFIDENCE", "0.6"))
 
 
 # 针对 Turn/Step (按步数衰减)，建议 0.001 (约 1000 步衰减到 37%)

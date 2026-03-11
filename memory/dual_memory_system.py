@@ -26,6 +26,9 @@ from memory.ltss_writer import write_consolidation_result
 from memory.raw_graph_ingest import ingest_raw_dialogue_window
 from memory.channels import RAW, CONSOLIDATED
 
+# ✅ 使用统一的 llm_utils（避免重复定义）
+from memory.llm_utils import bind_llm_low_temp, parse_json_dict
+
 # --- 时间片段抽取（用于让 LLM 更稳定解析 yesterday/today 等）---
 _TIME_HINT_RE = re.compile(
     r"\b("
@@ -70,52 +73,6 @@ def extract_time_snippets(memories_str: str, *, max_lines: int = 20, max_chars: 
     if len(out) > max_chars:
         out = out[:max_chars] + " ..."
     return out
-
-# ----------------------------
-# JSON parse helpers（保留你的鲁棒解析）
-# ----------------------------
-def bind_llm_low_temp(llm):
-    try:
-        return llm.bind(temperature=0.0)
-    except Exception:
-        pass
-    try:
-        return llm.bind_temperature(0.0)
-    except Exception:
-        pass
-    return llm
-
-
-def parse_json_dict(raw: str) -> Dict[str, Any]:
-    s = (raw or "").strip()
-    # 直接 JSON
-    try:
-        obj = json.loads(s)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-
-    # repair_json（如果装了）
-    try:
-        from json_repair import repair_json
-
-        obj = repair_json(s, return_objects=True)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-
-    # 截取最外层 {}
-    start = s.find("{")
-    end = s.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        s2 = s[start : end + 1]
-        obj2 = json.loads(s2)
-        if isinstance(obj2, dict):
-            return obj2
-
-    raise ValueError("Failed to parse JSON dict from LLM output.")
 
 
 # ----------------------------

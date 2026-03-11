@@ -89,6 +89,44 @@ logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+def _should_skip_apoc_schema(uri: str) -> bool:
+    flag = os.getenv("NEO4J_DISABLE_APOC_SCHEMA", "0").strip().lower() in ("1", "true", "yes")
+    if flag:
+        return True
+    u = (uri or "").lower()
+    if u.startswith("neo4j+s://") or u.startswith("neo4j+ssc://"):
+        return True
+    return os.getenv("USE_NEO4J_AURA", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _create_graph_store():
+    from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+
+    if not _should_skip_apoc_schema(NEO4J_URI):
+        return Neo4jPropertyGraphStore(
+            url=NEO4J_URI,
+            username=NEO4J_USERNAME,
+            password=NEO4J_PASSWORD,
+            database="neo4j",
+        )
+
+    original_refresh = Neo4jPropertyGraphStore.refresh_schema
+
+    def _noop_refresh(self):
+        return None
+
+    try:
+        Neo4jPropertyGraphStore.refresh_schema = _noop_refresh
+        return Neo4jPropertyGraphStore(
+            url=NEO4J_URI,
+            username=NEO4J_USERNAME,
+            password=NEO4J_PASSWORD,
+            database="neo4j",
+        )
+    finally:
+        Neo4jPropertyGraphStore.refresh_schema = original_refresh
+
+
 def load_world_books(world_dir: str):
     """读取世界书目录下的 txt 文件，构造 LlamaIndex Document，写入 metadata 标记"""
     from llama_index.core import Document
@@ -151,15 +189,8 @@ def bootstrap_world_knowledge():
     Settings.embed_model = LocalEmbeddingAdapter(my_embedding_model)
 
     # 3) Neo4j Property Graph Store
-    from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
-
-    logger.info("🔌 连接 Neo4j 数据库")
-    graph_store = Neo4jPropertyGraphStore(
-        url=NEO4J_URI,
-        username=NEO4J_USERNAME,
-        password=NEO4J_PASSWORD,
-        database="neo4j",
-    )
+    logger.info("Connecting to Neo4j Graph Store...")
+    graph_store = _create_graph_store()
 
     # 4) 加载世界书
     logger.info(f"📚 加载世界书目录：{WORLD_KNOWLEDGE_DIR}")

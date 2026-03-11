@@ -7,10 +7,12 @@ import sys
 import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Union
+import time
 
 import faiss
 import numpy as np
 from neo4j import GraphDatabase
+from neo4j.exceptions import ServiceUnavailable, SessionExpired, Neo4jError
 
 from utils.embedding import get_embedding_model
 
@@ -230,18 +232,20 @@ class LongTermSemanticStore:
     def __init__(self, bootstrap_now: bool = True, setup_schema: bool = True):
         print("LTSS: 正在初始化 Neo4j 连接...")
         self.embedding_model = get_embedding_model()
+        self._driver_args = {
+            "auth": (NEO4J_USERNAME, NEO4J_PASSWORD),
+            "keep_alive": True,
+            "max_connection_lifetime": 3600,
+            "liveness_check_timeout": 2,
+            "connection_acquisition_timeout": 30,
+            "max_connection_pool_size": 50,
+        }
 
         self.embedding_dim, self.embedding_model_name = self._detect_embedding_dim_and_model()
         print(f"LTSS: embedding probe => dim={self.embedding_dim}, model={self.embedding_model_name}")
 
         try:
-            self.driver = GraphDatabase.driver(
-                NEO4J_URI,
-                auth=(NEO4J_USERNAME, NEO4J_PASSWORD),
-                keep_alive=True,
-                max_connection_lifetime=3600,
-                liveness_check_timeout=2,
-            )
+            self.driver = GraphDatabase.driver(NEO4J_URI, **self._driver_args)
             self.driver.verify_connectivity()
             print("LTSS: Neo4j 连接成功。")
 
@@ -260,6 +264,22 @@ class LongTermSemanticStore:
             print(f"LTSS: 无法连接到 Neo4j: {e}")
             self.driver = None
 
+    def _reconnect(self) -> bool:
+        try:
+            if self.driver:
+                try:
+                    self.driver.close()
+                except Exception:
+                    pass
+            self.driver = GraphDatabase.driver(NEO4J_URI, **self._driver_args)
+            self.driver.verify_connectivity()
+            print("LTSS: Neo4j 连接已重建。")
+            return True
+        except Exception as e:
+            print(f"LTSS: Neo4j 重连失败: {e}")
+            self.driver = None
+            return False
+
     def _detect_embedding_dim_and_model(self):
         model_name = (
             getattr(self.embedding_model, "model", None)
@@ -277,15 +297,21 @@ class LongTermSemanticStore:
             print(f"LTSS: embedding dim probe failed, fallback to {VECTOR_DIM_FALLBACK}. err={e}")
             return int(VECTOR_DIM_FALLBACK) if VECTOR_DIM_FALLBACK else 1024, str(model_name)
 
-    def _get_vector_index_meta(self):
+    def _get_vector_index_meta(self, dim: Optional[int] = None, model: Optional[str] = None):
+        dim = int(dim) if dim is not None else int(self.embedding_dim)
+        model = str(model) if model is not None else str(self.embedding_model_name)
+        now = datetime.now(timezone.utc).isoformat()
         cypher = """
-        MATCH (m:SchemaMeta {key: $key})
+        MERGE (m:SchemaMeta {key: $key})
+        ON CREATE SET m.embedding_dim = $dim,
+                      m.embedding_model = $model,
+                      m.created_at = $now
         RETURN m.embedding_dim AS dim,
                m.embedding_model AS model,
                m.created_at AS created_at
         """
         with self.driver.session() as session:
-            rec = session.run(cypher, key=VECTOR_INDEX_META_KEY).single()
+            rec = session.run(cypher, key=VECTOR_INDEX_META_KEY, dim=dim, model=model, now=now).single()
             if not rec:
                 return None
             return {"dim": rec.get("dim"), "model": rec.get("model"), "created_at": rec.get("created_at")}
@@ -305,10 +331,8 @@ class LongTermSemanticStore:
             session.run(cypher, key=VECTOR_INDEX_META_KEY, dim=int(dim), model=str(model), now=now)
 
     def _ensure_vector_index_meta_consistency_or_fail(self, dim: int, model: str):
-        meta = self._get_vector_index_meta()
+        meta = self._get_vector_index_meta(dim=dim, model=model)
         if meta is None:
-            print(f"LTSS: SchemaMeta not found, creating meta: dim={dim}, model={model}")
-            self._set_vector_index_meta(dim, model)
             return
 
         meta_dim = meta.get("dim")
@@ -333,10 +357,19 @@ class LongTermSemanticStore:
     def _setup_fulltext_indices(self):
         print("LTSS: 正在检查并创建全文索引...")
         with self.driver.session() as session:
+            # 实体名称全文索引
             session.run(
                 """
                 CREATE FULLTEXT INDEX global_name_index IF NOT EXISTS
                 FOR (n:Agent|Location|Object|Concept|Event|Value|Date)
+                ON EACH [n.name]
+                """
+            )
+            # Fact节点全文索引（用于混合检索）
+            session.run(
+                """
+                CREATE FULLTEXT INDEX fact_name_fulltext_index IF NOT EXISTS
+                FOR (n:__Node__)
                 ON EACH [n.name]
                 """
             )
@@ -347,6 +380,7 @@ class LongTermSemanticStore:
         target_labels = [
             "Agent", "Location", "Object", "Concept", "Event", "Value", "Date",
             "Duration", "Action", "Trait", "Organization", "Skill", "TextUnit",
+            "__Node__",  # 简单事实节点，用于向量检索
         ]
         embedding_dimension = int(self.embedding_dim)
 
@@ -556,22 +590,35 @@ class LongTermSemanticStore:
             print("LTSS: 驱动未初始化，无法执行查询。")
             return None
 
-        with self.driver.session(database=db) as session:
-            def _run(tx):
-                return list(tx.run(query, parameters))
+        max_retries = int(os.getenv("NEO4J_RETRY_ATTEMPTS", "3"))
+        backoff = float(os.getenv("NEO4J_RETRY_BACKOFF_S", "1.0"))
 
-            if write:
-                if hasattr(session, "execute_write"):
-                    result = session.execute_write(_run)
-                else:
-                    result = session.write_transaction(_run)
-            else:
-                if hasattr(session, "execute_read"):
-                    result = session.execute_read(_run)
-                else:
-                    result = session.read_transaction(_run)
+        def _run_in_session():
+            with self.driver.session(database=db) as session:
+                def _run(tx):
+                    return list(tx.run(query, parameters))
 
-        return [record.data() for record in result]
+                if write:
+                    if hasattr(session, "execute_write"):
+                        result = session.execute_write(_run)
+                    else:
+                        result = session.write_transaction(_run)
+                else:
+                    if hasattr(session, "execute_read"):
+                        result = session.execute_read(_run)
+                    else:
+                        result = session.read_transaction(_run)
+                return [record.data() for record in result]
+
+        for attempt in range(max_retries):
+            try:
+                return _run_in_session()
+            except (ServiceUnavailable, SessionExpired, Neo4jError) as e:
+                if attempt >= max_retries - 1:
+                    print(f"LTSS: query failed after retries: {e}")
+                    return None
+                time.sleep(backoff * (2 ** attempt))
+                self._reconnect()
 
     def update_graph(self, cypher_query: str, parameters=None):
         """写入图谱前，自动处理 parameters['props'] 里的嵌套 dict。"""

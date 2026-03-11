@@ -1,104 +1,84 @@
+PS D:\python\智能体记忆框架 - cursor> activate
+PS D:\python\智能体记忆框架 - cursor> conda activate 智能体框架
+(智能体框架) PS D:\python\智能体记忆框架 - cursor> python test\Long_Memory_test.py          
+>> 
+[logging] file=D:\python\智能体记忆框架 - cursor\logs\run_local.txt
 
-LongMemoryEval:   0%|                                                                                        | 0/2 [00:00<?, ?case/s]2026-01-06 15:24:58,718 | INFO | 
-============================== 样本 [1/2] ID: 7405e8b1 ==============================
+开始测试 | 样本数: 1 | session_batch_size=10
+INCLUDE_ASSISTANT_TURNS=True
+数据集: D:\python\智能体记忆框架 - cursor\data\long_memory_eval\sampled_test_questions.json
+输出文件: D:\python\智能体记忆框架 - cursor\test\long_memory_results.local.json
 
-2026-01-06 15:25:03,100 | INFO | 角色 'LongMemory' 加载完毕，记忆系统就绪。
-2026-01-06 15:25:03,100 | INFO | [ingest_longmemoryeval] 开始注入 task: sessions=2, batch_size=10, overlap=0, question_turn_id=3, consolidation_mode=original_text
-2026-01-06 15:25:03,100 | INFO | [ingest_longmemoryeval] RAW 窗口 1: sessions[0:2] turn_id[1..2]
-2026-01-06 15:25:03,499 | INFO | [ingest_longmemoryeval] RAW 窗口入图：agent=LongMemory docs=2 turn_id_range=[1..2]
-2026-01-06 15:25:47,577 | INFO | [ingest_longmemoryeval] CONSOLIDATED 模式: original_text
-2026-01-06 15:25:47,577 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 并行巩固：docs=2 max_workers=6 chunk_turns=8 overlap=1
-2026-01-06 15:28:26,708 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_1 (virtual_time: TURN_1)
-2026-01-06 15:28:27,846 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=1.139
-2026-01-06 15:28:31,288 | INFO | [ltss_writer][embed] summary calls=2 total_sec=1.716 textunit_sec=1.139 node_calls=45 node_sec=0.578
-2026-01-06 15:28:31,288 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=1 doc_id=raw_LongMemory_20260106152503340666_1
-2026-01-06 15:28:31,288 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_2 (virtual_time: TURN_2)
-2026-01-06 15:28:32,010 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=0.722
-2026-01-06 15:28:35,586 | INFO | [ltss_writer][embed] summary calls=2 total_sec=1.149 textunit_sec=0.722 node_calls=39 node_sec=0.427
-2026-01-06 15:28:35,586 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=2 doc_id=raw_LongMemory_20260106152503340666_2
-2026-01-06 15:28:35,587 | INFO | [ingest_longmemoryeval] ✅ task 注入完成（RAW + CONSOLIDATED）
-2026-01-06 15:28:35,587 | INFO | [q_id=7405e8b1] 注入完成：num_sessions=2 question_time=TURN_3
-2026-01-06 15:28:35,587 | INFO |
-问题: Did I receive a higher percentage discount on my first order from HelloFresh, compared to my first UberEats order?
-2026-01-06 15:28:35,588 | INFO |
-========== 1. LongMemory 感知阶段 ==========
-2026-01-06 15:28:35,588 | INFO | 观测到: "Did I receive a higher percentage discount on my first order from HelloFresh, compared to my first UberEats order?"
-2026-01-06 15:28:35,652 | INFO | 
-========== 2. LongMemory 构建上下文阶段 ==========
-2026-01-06 15:28:35,653 | INFO | --- CFF: 正在构建上下文 (Time=TURN_3) ---
-2026-01-06 15:28:35,893 | INFO | [GraphRAG-V2] 命中事实组数: 10 | current_turn=3
-2026-01-06 15:28:35,966 | WARNING | Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownPropertyKeyWarning} {category: UNRECOGNIZED} {title: The provided property key is not in the database} {description: One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: evidencesourceunit)} {position: line: 26, column: 38, offset: 667} for query: "\n\nMATCH (u:Person)\nWITH u\nORDER BY CASE\n  WHEN toLower(u.name) = toLower($agent_name) THEN 0\n  WHEN u.name = 'User' THEN 1\n  ELSE 2\nEND\nLIMIT 1\n\nWITH u, $keywords AS kws\nMATCH (u)-[r]->(t)\nWHERE NOT 'TextUnit' IN labels(t)\n  AND any(k IN kws WHERE\n        toLower(coalesce(t.name, '')) CONTAINS toLower(k)\n        OR toLower(type(r)) CONTAINS toLower(k)\n  )\nRETURN\n  u.name AS src,\n  type(r) AS rel,\n  t.name AS tgt,\n  coalesce(r.source_of_belief, r.sourceofbelief, 'ground_truth') AS source_of_belief,\n  coalesce(r.confidence, 1.0) AS confidence,\n  coalesce(r.knowledge_type, r.knowledgetype, 'observed_fact') AS knowledge_type,\n  coalesce(r.evidence_source_unit, r.evidencesourceunit, 'unknown') AS evidence_source_unit,\n  coalesce(r.event_timestamp, r.eventtimestamp, r.virtual_time, r.virtualtime, 'unknown') AS event_time\nLIMIT $limit_val\n"
-2026-01-06 15:28:35,968 | INFO | [CFF] 上下文构建完成。
-2026-01-06 15:28:35,968 | INFO |
-========== 3. LongMemory 生成行动阶段 ==========
-2026-01-06 15:28:39,482 | INFO | 
-========== 4. LongMemory 执行行动阶段 ==========
-2026-01-06 15:28:39,483 | INFO | Action: Final Answer: You received a 20% discount on your first UberEats order, while there is no record of a percentage discoun...
-2026-01-06 15:28:39,483 | INFO |
---- LongMemory 的一次完整认知循环结束 ---
-2026-01-06 15:28:39,483 | INFO | 回答(截断): Final Answer: You received a 20% discount on your first UberEats order, while there is no record of a percentage discount on your first HelloFresh order, only a...
-2026-01-06 15:28:39,483 | INFO | 正在关闭智能体管理器...
+LongMemoryEval:   0%|                                                                                        | 0/1 [00:00<?, ?case/s]
+============================== 样本 [1/1] ID: 001be529 ==============================
+LTSS: 正在初始化 Neo4j 连接...
+[Remote Mode] connect embedding server: http://127.0.0.1:8000
+LTSS: embedding probe => dim=1024, model=unknown
+LTSS: Neo4j 连接成功。
+LTSS: 正在检查并创建数据库约束...
+LTSS: 智能体语义节点约束设置完成 (基于 ID)。
+LTSS: 正在检查并创建向量索引...
+LTSS: 向量索引检查完毕。
+LTSS: 正在检查并创建全文索引...
+>>> 正在执行 Neo4j 极速清理 (DETACH DELETE)...
+    - 所有节点与关系已清空，索引已保留。
 LTSS: Neo4j 连接已关闭。
-2026-01-06 15:28:39,483 | INFO | 再见。
-
-============================== 样本 [2/2] ID: gpt4_7abb270c ==============================
-
-2026-01-06 15:28:39,946 | INFO | 正在为 'LongMemory' 构建认知智能体...
+正在唤醒智能体: LongMemory
+LTSS: 正在初始化 Neo4j 连接...
+LTSS: embedding probe => dim=1024, model=unknown
+LTSS: Neo4j 连接成功。
+LTSS: 正在检查并创建数据库约束...
+LTSS: 智能体语义节点约束设置完成 (基于 ID)。
+LTSS: 正在检查并创建向量索引...
+LTSS: 向量索引检查完毕。
+LTSS: 正在检查并创建全文索引...
+>>> 跳过世界知识引导，直接使用现有长期记忆。
+正在为 'LongMemory' 构建认知智能体...
 STES for LongMemory: Creating a new empty store.
-2026-01-06 15:28:40,025 | INFO | 认知智能体 'LongMemory' 构建完成。
-2026-01-06 15:28:40,025 | INFO | 角色 'LongMemory' 加载完毕，记忆系统就绪。
-2026-01-06 15:28:40,025 | INFO | [ingest_longmemoryeval] 开始注入 task: sessions=6, batch_size=10, overlap=0, question_turn_id=7, consolidation_mode=original_text
-2026-01-06 15:28:40,025 | INFO | [ingest_longmemoryeval] RAW 窗口 1: sessions[0:6] turn_id[1..6]
-2026-01-06 15:28:40,173 | INFO | [ingest_longmemoryeval] RAW 窗口入图：agent=LongMemory docs=6 turn_id_range=[1..6]
-2026-01-06 15:30:48,573 | INFO | [ingest_longmemoryeval] CONSOLIDATED 模式: original_text
-2026-01-06 15:30:48,573 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 并行巩固：docs=6 max_workers=6 chunk_turns=8 overlap=1
-2026-01-06 15:33:28,925 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_1 (virtual_time: TURN_1)
-2026-01-06 15:33:30,045 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=1.119
-2026-01-06 15:33:32,081 | INFO | [ltss_writer][embed] summary calls=2 total_sec=1.632 textunit_sec=1.119 node_calls=36 node_sec=0.513
-2026-01-06 15:33:32,081 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=1 doc_id=raw_LongMemory_20260106152840173761_1
-2026-01-06 15:33:32,081 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_2 (virtual_time: TURN_2)
-2026-01-06 15:33:34,109 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=2.028
-2026-01-06 15:33:36,671 | INFO | [ltss_writer][embed] summary calls=2 total_sec=2.417 textunit_sec=2.028 node_calls=35 node_sec=0.389
-2026-01-06 15:33:36,672 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=2 doc_id=raw_LongMemory_20260106152840173761_2
-2026-01-06 15:33:36,672 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_3 (virtual_time: TURN_3)
-2026-01-06 15:33:37,454 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=0.782
-2026-01-06 15:33:40,955 | INFO | [ltss_writer][embed] summary calls=2 total_sec=1.141 textunit_sec=0.782 node_calls=28 node_sec=0.359
-2026-01-06 15:33:40,955 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=3 doc_id=raw_LongMemory_20260106152840173761_3
-2026-01-06 15:33:40,956 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_4 (virtual_time: TURN_4)
-2026-01-06 15:33:42,558 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=1.602
-2026-01-06 15:33:45,865 | INFO | [ltss_writer][embed] summary calls=2 total_sec=2.100 textunit_sec=1.602 node_calls=42 node_sec=0.497
-2026-01-06 15:33:45,865 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=4 doc_id=raw_LongMemory_20260106152840173761_4
-2026-01-06 15:33:45,865 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_5 (virtual_time: TURN_5)
-2026-01-06 15:33:46,819 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=0.954
-2026-01-06 15:33:49,965 | INFO | [ltss_writer][embed] summary calls=2 total_sec=1.273 textunit_sec=0.954 node_calls=25 node_sec=0.318
-2026-01-06 15:33:49,965 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=5 doc_id=raw_LongMemory_20260106152840173761_5
-2026-01-06 15:33:49,965 | INFO | [智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_6 (virtual_time: TURN_6)
-2026-01-06 15:33:50,721 | INFO | [ltss_writer][embed] mode=single kind=textunit n=1 sec=0.756
-2026-01-06 15:33:53,549 | INFO | [ltss_writer][embed] summary calls=2 total_sec=1.076 textunit_sec=0.756 node_calls=28 node_sec=0.320
-2026-01-06 15:33:53,549 | INFO | [ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=6 doc_id=raw_LongMemory_20260106152840173761_6
-2026-01-06 15:33:53,550 | INFO | [ingest_longmemoryeval] ✅ task 注入完成（RAW + CONSOLIDATED）
-2026-01-06 15:33:53,550 | INFO | [q_id=gpt4_7abb270c] 注入完成：num_sessions=6 question_time=TURN_7
-2026-01-06 15:33:53,550 | INFO |
-问题: What is the order of the six museums I visited from earliest to latest?
-2026-01-06 15:33:53,551 | INFO |
-========== 1. LongMemory 感知阶段 ==========
-2026-01-06 15:33:53,551 | INFO | 观测到: "What is the order of the six museums I visited from earliest to latest?"
-2026-01-06 15:33:53,618 | INFO | 
-========== 2. LongMemory 构建上下文阶段 ==========
-2026-01-06 15:33:53,618 | INFO | --- CFF: 正在构建上下文 (Time=TURN_7) ---
-2026-01-06 15:33:53,906 | INFO | [GraphRAG-V2] 命中事实组数: 10 | current_turn=7
-2026-01-06 15:33:53,908 | INFO | [CFF] 上下文构建完成。
-2026-01-06 15:33:53,909 | INFO |
-========== 3. LongMemory 生成行动阶段 ==========
-2026-01-06 15:33:56,689 | INFO | 
-========== 4. LongMemory 执行行动阶段 ==========
-2026-01-06 15:33:56,690 | INFO | Action: Final Answer: There is no explicit information about the order of the six museums you visited in the provided evidence.
-...
-2026-01-06 15:33:56,691 | INFO |
---- LongMemory 的一次完整认知循环结束 ---
-2026-01-06 15:33:56,691 | INFO | 回答(截断): Final Answer: There is no explicit information about the order of the six museums you visited in the provided evidence.
-Evidence:
-2026-01-06 15:33:56,691 | INFO | 正在关闭智能体管理器...
-LTSS: Neo4j 连接已关闭。
-2026-01-06 15:33:56,691 | INFO | 再见。
+认知智能体 'LongMemory' 构建完成。
+角色 'LongMemory' 加载完毕，记忆系统就绪。
+[ingest_longmemoryeval] 开始注入 task: sessions=1, batch_size=10, overlap=0, question_turn_id=2, consolidation_mode=original_text     
+[ingest_longmemoryeval] RAW 窗口 1: sessions[0:1] turn_id[1..1]
+[ingest_longmemoryeval] RAW 窗口入图：agent=LongMemory docs=1 turn_id_range=[1..1]
+[ingest_longmemoryeval] CONSOLIDATED 模式: original_text
+[ingest_longmemoryeval] ORIGINAL_TEXT 并行巩固：docs=1 max_workers=6 chunk_turns=8 overlap=1
+[智能体 'LongMemory' 的记忆巩固引擎] 生成 TextUnit ID: unit_TURN_1 (virtual_time: TURN_1)
+[ltss_writer][embed] mode=single kind=textunit n=1 sec=2.242
+[ltss_writer][embed] summary calls=2 total_sec=3.109 textunit_sec=2.242 node_calls=41 node_sec=0.867
+[ingest_longmemoryeval] ORIGINAL_TEXT 写入完成：turn_id=1 doc_id=raw_LongMemory_20260107200812930591_1
+[ingest_longmemoryeval] ✅ task 注入完成（RAW + CONSOLIDATED）
+[q_id=001be529] 注入完成：num_sessions=1 question_time=TURN_2
 
+问题: How long did I wait for the decision on my asylum application?
+
+========== 1. LongMemory 感知阶段 ==========
+观测到: "How long did I wait for the decision on my asylum application?"
+
+========== 2. LongMemory 构建上下文阶段 ==========
+--- CFF: 正在构建上下文 (Time=TURN_2) ---
+[GraphRAG-V2] ??????: 10 | current_turn=2
+[CFF] 上下文构建完成。
+
+========== 3. LongMemory 生成行动阶段 ==========
+
+========== 4. LongMemory 执行行动阶段 ==========
+Action: Final Answer: Over a year
+Evidence:
+- (Asylum application) -[WAIT_TIME]-> (Over a year) [channel=consolidated; score=0.9...
+
+--- LongMemory 的一次完整认知循环结束 ---
+回答(截断): Final Answer: Over a year
+Evidence:
+- (Asylum application) -[WAIT_TIME]-> (Over a year) [channel=consolidated; score=0.941351437231576; confidence=0.9; event_ti...       
+正在关闭智能体管理器...
+LTSS: Neo4j 连接已关闭。
+再见。
+
+>>> 正在清理短期记忆 (FAISS 数据)...
+    数据目录: D:\python\智能体记忆框架 - cursor\data\agents
+    - 已删除角色目录: LongMemory
+LongMemoryEval: 100%|███████████████████████████████████████████████████████████████████████████████| 1/1 [04:59<00:00, 299.41s/case] 
+
+Test finished. Results written to: D:\python\智能体记忆框架 - cursor\test\long_memory_results.local.json
+Official format written: D:\python\智能体记忆框架 - cursor\test\long_memory_results.local.jsonl
+(智能体框架) PS D:\python\智能体记忆框架 - cursor> 

@@ -130,6 +130,7 @@ class ContextualFocusFramework:
             temporal_triples=temporal_triples,
             derived_facts=derived_facts,
             derived_evidence=derived_evidence,
+            query=observation,  # ✅ 传入问题文本，用于裁剪时优先保留相关实体
         )
 
         if _DEBUG_PIPELINE:

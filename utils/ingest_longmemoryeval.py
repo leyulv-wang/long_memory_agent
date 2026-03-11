@@ -47,6 +47,7 @@ from config import (
     NEO4J_URI,
     NEO4J_USERNAME,
     NEO4J_PASSWORD,
+    RAW_REL_CONFIDENCE,
 )
 
 from utils.embedding import get_embedding_model
@@ -65,6 +66,54 @@ from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.llms.openai_like import OpenAILike
 
 from llama_index.core.embeddings import BaseEmbedding
+
+_UPDATE_REL_TYPES = {
+    "LIVES_IN",
+    "RESIDES_IN",
+    "HAS_LOCATION",
+    "WORKS_AT",
+    "HAS_JOB",
+    "HAS_STATUS",
+    "HAS_PHONE",
+    "HAS_EMAIL",
+}
+
+
+def _should_skip_apoc_schema() -> bool:
+    flag = os.getenv("NEO4J_DISABLE_APOC_SCHEMA", "0").strip().lower() in ("1", "true", "yes")
+    if flag:
+        return True
+    uri = (NEO4J_URI or "").lower()
+    if uri.startswith("neo4j+s://") or uri.startswith("neo4j+ssc://"):
+        return True
+    return os.getenv("USE_NEO4J_AURA", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _create_graph_store():
+    if not _should_skip_apoc_schema():
+        return Neo4jPropertyGraphStore(
+            url=NEO4J_URI,
+            username=NEO4J_USERNAME,
+            password=NEO4J_PASSWORD,
+            database="neo4j",
+        )
+
+    # Aura often blocks apoc.meta.data; skip schema refresh to avoid failure.
+    original_refresh = Neo4jPropertyGraphStore.refresh_schema
+
+    def _noop_refresh(self):
+        return None
+
+    try:
+        Neo4jPropertyGraphStore.refresh_schema = _noop_refresh
+        return Neo4jPropertyGraphStore(
+            url=NEO4J_URI,
+            username=NEO4J_USERNAME,
+            password=NEO4J_PASSWORD,
+            database="neo4j",
+        )
+    finally:
+        Neo4jPropertyGraphStore.refresh_schema = original_refresh
 
 
 # =========================
@@ -135,6 +184,104 @@ def build_session_text(
         buf.append(f"{role.upper()}: {content}")
 
     return "\n".join(buf).strip()
+
+
+# =========================
+# TextUnit 分块（提高检索粒度）
+# =========================
+# 配置开关：是否启用分块
+ENABLE_TEXTUNIT_CHUNKING = os.getenv("ENABLE_TEXTUNIT_CHUNKING", "1").strip().lower() in ("1", "true", "yes")
+
+
+@dataclass
+class ChunkInfo:
+    """分块信息"""
+    chunk_id: int           # 块序号（从1开始）
+    total_chunks: int       # 总块数
+    content: str            # 块内容
+    start_turn_idx: int     # 起始 turn 索引
+    end_turn_idx: int       # 结束 turn 索引
+
+
+def chunk_session_turns(
+    session_turns: List[Dict[str, Any]],
+    *,
+    include_assistant: bool = True,
+    max_turn_chars: int = 6000,
+) -> List[ChunkInfo]:
+    """
+    将 session 的 turns 分块，提高检索粒度。
+    
+    分块规则：
+    1. 基本单位：一个 USER + 对应的 ASSISTANT 回复 = 一个 chunk
+    2. 每个 chunk 独立向量化
+    
+    Args:
+        session_turns: session 的 turns 列表
+        include_assistant: 是否包含 assistant 回复
+        max_turn_chars: 单个 turn 最大字符数（截断保护）
+    
+    Returns:
+        ChunkInfo 列表
+    """
+    if not session_turns:
+        return []
+    
+    # 按 USER+ASSISTANT 对分组，每对一个 chunk
+    chunks: List[ChunkInfo] = []
+    current_pair_start = 0
+    current_pair_text = []
+    
+    for i, t in enumerate(session_turns):
+        role = (t.get("role") or "").strip().lower()
+        if role not in ("user", "assistant"):
+            continue
+        if (not include_assistant) and role == "assistant":
+            continue
+        
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        
+        # 截断保护（防止单个 turn 过长）
+        if len(content) > max_turn_chars:
+            content = content[: max_turn_chars - 3] + "..."
+        
+        turn_text = f"{role.upper()}: {content}"
+        
+        # 如果是 USER 且已有内容，说明上一对结束了，保存为一个 chunk
+        if role == "user" and current_pair_text:
+            chunks.append(ChunkInfo(
+                chunk_id=len(chunks) + 1,
+                total_chunks=0,  # 稍后更新
+                content="\n".join(current_pair_text),
+                start_turn_idx=current_pair_start,
+                end_turn_idx=i - 1,
+            ))
+            current_pair_text = []
+            current_pair_start = i
+        
+        if not current_pair_text:
+            current_pair_start = i
+        
+        current_pair_text.append(turn_text)
+    
+    # 保存最后一个 chunk
+    if current_pair_text:
+        chunks.append(ChunkInfo(
+            chunk_id=len(chunks) + 1,
+            total_chunks=0,
+            content="\n".join(current_pair_text),
+            start_turn_idx=current_pair_start,
+            end_turn_idx=len(session_turns) - 1,
+        ))
+    
+    # 更新 total_chunks
+    total = len(chunks)
+    for c in chunks:
+        c.total_chunks = total
+    
+    return chunks
 
 
 # =========================
@@ -351,6 +498,18 @@ def _postprocess_raw_doc(graph_store: Neo4jPropertyGraphStore, info: RawDocInfo,
         cy_nodes, {"doc_id": info.doc_id, "ch": info.channel, "agent_name": info.agent_name}
     )
 
+    # 1.1) Ensure doc-scoped nodes have stable names for downstream Fact linking.
+    cy_fix_names = """
+    MATCH (n)
+    WHERE n.doc_id = $doc_id OR n.document_id = $doc_id OR n.ref_doc_id = $doc_id
+      AND (n.name IS NULL OR trim(toString(n.name)) = '')
+    SET n.name = coalesce(
+      n.title, n.text, n.value, n.id, n.key, n.label, toString(elementId(n))
+    )
+    RETURN count(n) AS fixed
+    """
+    graph_store.structured_query(cy_fix_names, {"doc_id": info.doc_id})
+
     # 2) raw TextUnit：写 content + embedding
     # 2) raw TextUnit：写 content + embedding
     tu_emb = textunit_embedding  # ✅ 优先吃窗口级批量 embedding
@@ -418,6 +577,7 @@ def _postprocess_raw_doc(graph_store: Neo4jPropertyGraphStore, info: RawDocInfo,
         e.session_id = $session_id,
         e.session_time_raw = $session_time_raw,
         e.session_time_iso = $session_time_iso,
+        e.event_timestamp = coalesce(e.event_timestamp, $session_time_iso),
         e.updated_at = $real_time
     WITH e
     MATCH (u:TextUnit {name: $textunit})
@@ -452,9 +612,25 @@ def _postprocess_raw_doc(graph_store: Neo4jPropertyGraphStore, info: RawDocInfo,
         r.agent_name = coalesce(r.agent_name, $agent_name),
         r.turn_id = coalesce(r.turn_id, $turn_id),
         r.virtual_time = coalesce(r.virtual_time, $virtual_time),
-        r.confidence = coalesce(r.confidence, 1.0),
+        r.confidence = coalesce(r.confidence, $raw_conf),
         r.event_id = coalesce(r.event_id, $event_id),
-        r.session_time_iso = coalesce(r.session_time_iso, $session_time_iso)
+        r.session_time_iso = coalesce(r.session_time_iso, $session_time_iso),
+        r.event_timestamp = coalesce(r.event_timestamp, $session_time_iso, $session_time_raw, $virtual_time),
+        r.source_of_belief = coalesce(r.source_of_belief, 'raw_extraction'),
+        r.knowledge_type = coalesce(r.knowledge_type, 'observed_fact'),
+        r.belief_key = coalesce(
+          r.belief_key,
+          $ch + ':' + $agent_name + ':' +
+          coalesce(labels(a)[0], 'Concept') + ':' + toString(a.name) + ':' + type(r) + ':' +
+          coalesce(labels(b)[0], 'Concept') + ':' + toString(b.name)
+        ),
+        r.slot_key = coalesce(
+          r.slot_key,
+          CASE
+            WHEN type(r) IN $update_types THEN coalesce(labels(a)[0], 'Concept') + ':' + toString(a.name) + ':' + type(r)
+            ELSE toString(a.name) + ':' + type(r)
+          END
+        )
     RETURN count(r) AS updated
     """
     rel_rows = graph_store.structured_query(
@@ -466,20 +642,176 @@ def _postprocess_raw_doc(graph_store: Neo4jPropertyGraphStore, info: RawDocInfo,
             "turn_id": info.turn_id,
             "virtual_time": info.virtual_time,
             "event_id": info.event_id,
+            "session_time_raw": info.session_time_raw,
             "session_time_iso": info.session_time_iso,
+            "update_types": list(_UPDATE_REL_TYPES),
+            "raw_conf": float(RAW_REL_CONFIDENCE),
         },
     )
+
+    # 4.1) Normalize visit-like relations into VISITED for stable retrieval.
+    cy_visit_rels = """
+    MATCH (n)
+    WHERE n.doc_id = $doc_id OR n.document_id = $doc_id OR n.ref_doc_id = $doc_id
+    WITH collect(elementId(n)) AS ids
+    MATCH (a)-[r]->(b)
+    WHERE (elementId(a) IN ids OR elementId(b) IN ids)
+      AND type(r) IN $visit_types
+    MERGE (a)-[v:VISITED]->(b)
+    SET
+        v.rel_alias = coalesce(v.rel_alias, type(r)),
+        v.channel = coalesce(v.channel, $ch),
+        v.agent_name = coalesce(v.agent_name, $agent_name),
+        v.turn_id = coalesce(v.turn_id, $turn_id),
+        v.virtual_time = coalesce(v.virtual_time, $virtual_time),
+        v.confidence = coalesce(v.confidence, coalesce(r.confidence, $raw_conf)),
+        v.event_id = coalesce(v.event_id, coalesce(r.event_id, $event_id)),
+        v.session_time_iso = coalesce(v.session_time_iso, $session_time_iso),
+        v.event_timestamp = coalesce(v.event_timestamp, r.event_timestamp, $session_time_iso, $session_time_raw, $virtual_time),
+        v.source_of_belief = coalesce(v.source_of_belief, 'raw_extraction'),
+        v.knowledge_type = coalesce(v.knowledge_type, 'observed_fact'),
+        v.belief_key = coalesce(
+          v.belief_key,
+          $ch + ':' + $agent_name + ':' +
+          coalesce(labels(a)[0], 'Concept') + ':' + toString(a.name) + ':' + 'VISITED' + ':' +
+          coalesce(labels(b)[0], 'Concept') + ':' + toString(b.name)
+        ),
+        v.slot_key = coalesce(v.slot_key, toString(a.name) + ':' + 'VISITED')
+    RETURN count(v) AS visited_cnt
+    """
+    graph_store.structured_query(
+        cy_visit_rels,
+        {
+            "doc_id": info.doc_id,
+            "ch": info.channel,
+            "agent_name": info.agent_name,
+            "turn_id": info.turn_id,
+            "virtual_time": info.virtual_time,
+            "event_id": info.event_id,
+            "session_time_raw": info.session_time_raw,
+            "session_time_iso": info.session_time_iso,
+            "raw_conf": float(RAW_REL_CONFIDENCE),
+            "visit_types": ["VISIT", "VISITED", "WENT_TO", "ATTENDED", "TOURED", "TOUR", "GUIDED_TOUR", "WAS_AT"],
+        },
+    )
+
+    # 5) Raw relationships -> Fact nodes (for V2 Fact retrieval)
+    cy_raw_facts = """
+    MATCH (n)
+    WHERE n.doc_id = $doc_id OR n.document_id = $doc_id OR n.ref_doc_id = $doc_id
+    WITH collect(elementId(n)) AS ids
+    MATCH (a)-[r]->(b)
+    WHERE elementId(a) IN ids OR elementId(b) IN ids
+      AND type(r) <> 'FROM_SOURCE'
+    WITH a, b, r,
+         labels(a) AS la, labels(b) AS lb,
+         coalesce(r.channel, $ch) AS ch,
+         coalesce(r.agent_name, $agent_name) AS ag
+    WITH a, b, r, la, lb, ch, ag,
+         coalesce(la[0], 'Concept') AS a_label,
+         coalesce(lb[0], 'Concept') AS b_label
+    WHERE a.name IS NOT NULL AND b.name IS NOT NULL
+    WITH a, b, r, a_label, b_label, ch, ag,
+         a_label + ':' + a.name + ':' + type(r) + ':' + b_label + ':' + b.name AS base_key
+    WITH a, b, r, base_key, ch, ag,
+         ch + ':' + ag + ':' + base_key AS belief_key
+
+    MERGE (f:Fact {belief_key: belief_key})
+    ON CREATE SET
+        f.type = type(r),
+        f.slot_key = coalesce(
+          r.slot_key,
+          CASE
+            WHEN type(r) IN $update_types THEN coalesce(labels(a)[0], 'Concept') + ':' + toString(a.name) + ':' + type(r)
+            ELSE toString(a.name) + ':' + type(r)
+          END
+        ),
+        f.channel = ch,
+        f.agent_name = ag,
+        f.virtual_time = coalesce(r.virtual_time, $virtual_time),
+        f.turn_id = coalesce(r.turn_id, $turn_id),
+        f.recorded_turn_id = coalesce(r.turn_id, $turn_id),
+        f.event_turn_offset = 0,
+        f.event_turn_id = coalesce(r.turn_id, $turn_id),
+        f.session_time = coalesce($session_time_iso, $session_time_raw),
+        f.event_timestamp = coalesce(r.event_timestamp, $session_time_iso, $session_time_raw, $virtual_time),
+        f.time_text = r.time_text,
+        f.source_of_belief = coalesce(r.source_of_belief, 'raw_extraction'),
+        f.knowledge_type = coalesce(r.knowledge_type, 'observed_fact'),
+        f.confidence = coalesce(r.confidence, $raw_conf),
+        f.created_at = $real_time,
+        f.first_turn_id = coalesce(r.turn_id, $turn_id),
+        f.first_event_time = coalesce(r.event_timestamp, $session_time_iso, $session_time_raw, $virtual_time),
+        f.last_turn_id = coalesce(r.turn_id, $turn_id),
+        f.last_event_time = coalesce(r.event_timestamp, $session_time_iso, $session_time_raw, $virtual_time),
+        f.mention_count = 1,
+        f.turn_history = [coalesce(r.turn_id, $turn_id)]
+    ON MATCH SET
+        f.confidence = CASE
+            WHEN coalesce(r.confidence, 0.0) > coalesce(f.confidence, 0.0)
+            THEN r.confidence ELSE f.confidence END,
+        f.updated_at = $real_time,
+        f.last_turn_id = coalesce(r.turn_id, $turn_id),
+        f.last_event_time = coalesce(r.event_timestamp, $session_time_iso, $session_time_raw, $virtual_time),
+        f.time_text = coalesce(r.time_text, f.time_text),
+        f.mention_count = coalesce(f.mention_count, 0) + 1,
+        f.turn_history = (coalesce(f.turn_history, []) + [coalesce(r.turn_id, $turn_id)])[-10..]
+    WITH f, a, b, r
+    MERGE (f)-[:SUBJECT]->(a)
+    MERGE (f)-[:OBJECT]->(b)
+    WITH f, r
+    MATCH (e:Event {event_id: coalesce(r.event_id, $event_id)})
+    MERGE (e)-[:HAS_FACT]->(f)
+    RETURN count(f) AS fact_cnt
+    """
+    fact_rows = graph_store.structured_query(
+        cy_raw_facts,
+        {
+            "doc_id": info.doc_id,
+            "ch": info.channel,
+            "agent_name": info.agent_name,
+            "turn_id": info.turn_id,
+            "virtual_time": info.virtual_time,
+            "event_id": info.event_id,
+            "session_time_raw": info.session_time_raw,
+            "session_time_iso": info.session_time_iso,
+            "real_time": real_time,
+            "update_types": list(_UPDATE_REL_TYPES),
+            "raw_conf": float(RAW_REL_CONFIDENCE),
+        },
+    )
+
+    # 6) Debug: raw relation type stats (helps locate noisy relations)
+    rel_stats = []
+    if _DEBUG_INGEST:
+        cy_rel_stats = """
+        MATCH (n)
+        WHERE n.doc_id = $doc_id OR n.document_id = $doc_id OR n.ref_doc_id = $doc_id
+        WITH collect(elementId(n)) AS ids
+        MATCH (a)-[r]->(b)
+        WHERE elementId(a) IN ids OR elementId(b) IN ids
+          AND type(r) <> 'FROM_SOURCE'
+        RETURN type(r) AS rel_type, count(r) AS cnt
+        ORDER BY cnt DESC
+        """
+        rel_stats = graph_store.structured_query(cy_rel_stats, {"doc_id": info.doc_id}) or []
     if _DEBUG_INGEST:
         node_cnt = node_rows[0].get("updated") if node_rows else 0
         tu_name = tu_rows[0].get("name") if tu_rows else "unknown"
         link_cnt = link_rows[0].get("linked") if link_rows else 0
         evt_id = evt_rows[0].get("event_id") if evt_rows else "unknown"
         rel_cnt = rel_rows[0].get("updated") if rel_rows else 0
+        fact_cnt = fact_rows[0].get("fact_cnt") if fact_rows else 0
         logger.info(
             "[ingest_longmemoryeval][debug] postprocess "
             f"doc_id={info.doc_id} node_updates={node_cnt} textunit={tu_name} "
-            f"link_cnt={link_cnt} event_id={evt_id} rel_updates={rel_cnt}"
+            f"link_cnt={link_cnt} event_id={evt_id} rel_updates={rel_cnt} fact_nodes={fact_cnt}"
         )
+        if rel_stats:
+            logger.info(
+                "[ingest_longmemoryeval][debug] rel_type_counts "
+                + ", ".join([f"{r.get('rel_type')}={r.get('cnt')}" for r in rel_stats[:12]])
+            )
 
 
 def iter_windows(total: int, batch_size: int, overlap: int) -> Iterable[Tuple[int, int]]:
@@ -507,8 +839,9 @@ def ingest_raw_sessions_window(
     sessions_window: List[List[Dict[str, Any]]],
     session_ids_window: List[str],
     session_dates_window: List[str],
-    turn_ids_window: List[int],  # ✅ 关键：显式 turn_id
+    turn_ids_window: List[int],
     include_assistant: bool = True,
+    # 以下参数保留接口兼容性，但不再使用（去掉LlamaIndex提取）
     chunk_size: int = 900,
     chunk_overlap: int = 180,
     num_workers: int = 4,
@@ -516,124 +849,136 @@ def ingest_raw_sessions_window(
     show_progress: bool = False,
 ) -> List[RawDocInfo]:
     """
-    一个窗口内，把多个 session 作为多个 Document 一次性跑进 Neo4j。
-    返回每个 doc 的锚点信息（doc_id/turn_id/virtual_time...），后续 consolidated 用 doc_id 拉 raw 子图。
+    RAW通道入图（支持分块）：
+    - 如果启用分块（ENABLE_TEXTUNIT_CHUNKING=1），将长 session 分成多个 TextUnit
+    - 每个 chunk 独立向量化，提高检索粒度
+    - 结构化提取由CONSOLIDATED通道负责
     """
     if not (len(sessions_window) == len(session_ids_window) == len(session_dates_window) == len(turn_ids_window)):
         raise ValueError("ingest_raw_sessions_window: window lists length mismatch")
 
-    # 1) 初始化 LlamaIndex Settings（LLM + Embedding）
-    Settings.llm = OpenAILike(
-        model=CHEAP_GRAPHRAG_CHAT_MODEL,
-        api_base=CHEAP_GRAPHRAG_API_BASE,
-        api_key=CHEAP_GRAPHRAG_CHAT_API_KEY,
-        is_chat_model=True,
-        context_window=32000,
-        max_tokens=4096,
-    )
+    # 1) 获取 embedding model 和 Neo4j 连接
     embed_model = get_embedding_model()
-    Settings.embed_model = _LocalEmbeddingAdapter(embed_model)
+    
+    from neo4j import GraphDatabase
+    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 
-    # 2) 连接 Neo4j graph store
-    graph_store = Neo4jPropertyGraphStore(
-        url=NEO4J_URI,
-        username=NEO4J_USERNAME,
-        password=NEO4J_PASSWORD,
-        database="neo4j",
-    )
-
-    # 3) 构造 docs
+    # 2) 构造 docs 信息
     ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
     safe_agent = _safe_agent(agent_name)
+    real_time = datetime.datetime.now().isoformat()
 
-    docs: List[Document] = []
     infos: List[RawDocInfo] = []
+    
+    # 用于存储分块信息：textunit_id -> (content, chunk_id, total_chunks)
+    chunk_meta: Dict[str, Tuple[str, int, int]] = {}
 
     for sess_turns, sid, sdate, turn_id in zip(sessions_window, session_ids_window, session_dates_window, turn_ids_window):
         turn_id = int(turn_id)
         virtual_time = f"TURN_{turn_id}"
-
-        doc_id = f"raw_{safe_agent}_{ts}_{turn_id}"
-        textunit_id = f"raw_unit_{safe_agent}_{ts}_{turn_id}"
-        event_id = f"evt:raw:{safe_agent}:{virtual_time}:{textunit_id}"
-
+        sraw, siso = _parse_dataset_time(sdate)
+        
+        # 完整的 session 文本（用于 __Document__）
         session_text = build_session_text(sess_turns, include_assistant=include_assistant)
         if not session_text:
             continue
 
-        if _DEBUG_INGEST:
-            logger.info(
-                "[ingest_longmemoryeval][debug] session "
-                f"turn_id={turn_id} session_id={sid} text_len={len(session_text)} date_raw={sdate}"
+        doc_id = f"raw_{safe_agent}_{ts}_{turn_id}"
+        
+        # 判断是否启用分块
+        if ENABLE_TEXTUNIT_CHUNKING:
+            # 分块处理
+            chunks = chunk_session_turns(sess_turns, include_assistant=include_assistant)
+            
+            if not chunks:
+                # 分块失败，回退到整个 session
+                chunks = [ChunkInfo(
+                    chunk_id=1,
+                    total_chunks=1,
+                    content=session_text,
+                    start_turn_idx=0,
+                    end_turn_idx=len(sess_turns) - 1,
+                )]
+            
+            if _DEBUG_INGEST:
+                logger.info(
+                    f"[ingest_longmemoryeval][chunking] turn_id={turn_id} "
+                    f"session_len={len(session_text)} chunks={len(chunks)} "
+                    f"chunk_lens=[{', '.join(str(len(c.content)) for c in chunks)}]"
+                )
+            
+            # 为每个 chunk 创建 RawDocInfo
+            for chunk in chunks:
+                if chunk.total_chunks > 1:
+                    textunit_id = f"unit_TURN_{turn_id}_chunk_{chunk.chunk_id}"
+                else:
+                    textunit_id = f"unit_TURN_{turn_id}"
+                
+                event_id = f"evt:raw:{safe_agent}:{virtual_time}:{textunit_id}"
+                
+                infos.append(
+                    RawDocInfo(
+                        doc_id=doc_id,
+                        textunit_id=textunit_id,
+                        event_id=event_id,
+                        agent_name=agent_name,
+                        channel=RAW,
+                        virtual_time=virtual_time,
+                        turn_id=turn_id,
+                        session_id=sid,
+                        session_time_raw=sraw,
+                        session_time_iso=siso,
+                        session_text=chunk.content,  # 使用 chunk 内容
+                        session_turns=sess_turns,
+                    )
+                )
+                
+                # 记录分块信息
+                chunk_meta[textunit_id] = (chunk.content, chunk.chunk_id, chunk.total_chunks)
+        else:
+            # 不分块，使用整个 session
+            textunit_id = f"unit_TURN_{turn_id}"
+            event_id = f"evt:raw:{safe_agent}:{virtual_time}:{textunit_id}"
+            
+            if _DEBUG_INGEST:
+                logger.info(
+                    "[ingest_longmemoryeval][debug] session "
+                    f"turn_id={turn_id} session_id={sid} text_len={len(session_text)} date_raw={sdate}"
+                )
+            
+            infos.append(
+                RawDocInfo(
+                    doc_id=doc_id,
+                    textunit_id=textunit_id,
+                    event_id=event_id,
+                    agent_name=agent_name,
+                    channel=RAW,
+                    virtual_time=virtual_time,
+                    turn_id=turn_id,
+                    session_id=sid,
+                    session_time_raw=sraw,
+                    session_time_iso=siso,
+                    session_text=session_text,
+                    session_turns=sess_turns,
+                )
             )
+            chunk_meta[textunit_id] = (session_text, 1, 1)
 
-        sraw, siso = _parse_dataset_time(sdate)
-        md = {
-            "doc_id": doc_id,
-            "document_id": doc_id,
-            "agent_name": agent_name,
-            "channel": RAW,
-            "virtual_time": virtual_time,
-            "turn_id": turn_id,
-            "session_id": sid,
-            "session_time_raw": sraw,
-            "session_time_iso": siso,
-            "ref_doc_id": doc_id,
-        }
-
-        try:
-            docs.append(Document(text=session_text, metadata=md, doc_id=doc_id))
-        except TypeError:
-            docs.append(Document(text=session_text, metadata=md, id_=doc_id))
-
-        infos.append(
-            RawDocInfo(
-                doc_id=doc_id,
-                textunit_id=textunit_id,
-                event_id=event_id,
-                agent_name=agent_name,
-                channel=RAW,
-                virtual_time=virtual_time,
-                turn_id=turn_id,
-                session_id=sid,
-                session_time_raw=sraw,
-                session_time_iso=siso,
-                session_text=session_text,
-                session_turns=sess_turns,
-            )
-        )
-
-    if not docs:
-        graph_store.close()
+    if not infos:
+        driver.close()
         return []
 
-    # 4) pipeline：split + extractor（一次性处理多个 doc）
-    splitter = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    extractor = SimpleLLMPathExtractor(
-        llm=Settings.llm,
-        max_paths_per_chunk=max_paths_per_chunk,
-        num_workers=num_workers,
-    )
-
+    # 统计分块信息
+    total_textunits = len(infos)
+    chunked_sessions = len(set(i.turn_id for i in infos))
     logger.info(
-        f"[ingest_longmemoryeval] RAW 窗口入图：agent={agent_name} docs={len(docs)} "
-        f"turn_id_range=[{min(turn_ids_window)}..{max(turn_ids_window)}]"
+        f"[ingest_longmemoryeval] RAW 窗口入图：agent={agent_name} "
+        f"sessions={chunked_sessions} textunits={total_textunits} "
+        f"turn_id_range=[{min(turn_ids_window)}..{max(turn_ids_window)}] "
+        f"chunking={'enabled' if ENABLE_TEXTUNIT_CHUNKING else 'disabled'}"
     )
 
-    PropertyGraphIndex.from_documents(
-        documents=docs,
-        property_graph_store=graph_store,
-        kg_extractors=[extractor],
-        transformations=[splitter],
-        show_progress=show_progress,
-    )
-    if _DEBUG_INGEST:
-        logger.info(
-            f"[ingest_longmemoryeval][debug] PropertyGraphIndex done docs={len(docs)} "
-            f"chunksize={chunk_size} overlap={chunk_overlap} workers={num_workers}"
-        )
-
-    # 5) ✅ 窗口级批量计算 RAW TextUnit embedding（session_text）
+    # 3) 批量计算 embedding
     emb_map: Dict[str, Optional[List[float]]] = {}
     try:
         texts = [(i.session_text or "").strip() for i in infos]
@@ -645,8 +990,17 @@ def ingest_raw_sessions_window(
             else:
                 batch_embs = [embed_model.embed_query(x) for x in batch_texts] if embed_model else []
 
+            # 验证 embedding 结果
+            valid_count = 0
             for pos, k in enumerate(non_empty_idx):
-                emb_map[infos[k].textunit_id] = batch_embs[pos] if pos < len(batch_embs) else None
+                if pos < len(batch_embs) and batch_embs[pos] and len(batch_embs[pos]) > 0:
+                    emb_map[infos[k].textunit_id] = batch_embs[pos]
+                    valid_count += 1
+                else:
+                    emb_map[infos[k].textunit_id] = None
+                    logger.warning(f"[ingest_longmemoryeval] embedding empty for textunit {infos[k].textunit_id}")
+            
+            logger.info(f"[ingest_longmemoryeval] RAW embedding: {valid_count}/{len(non_empty_idx)} valid")
 
         for k, t in enumerate(texts):
             if not t:
@@ -657,17 +1011,159 @@ def ingest_raw_sessions_window(
         for i in infos:
             emb_map[i.textunit_id] = None
 
-    # 6) 后处理：raw 通道打标 + TextUnit/Event（优先吃 batch embedding；失败自动降级）
-    for info in infos:
-        _postprocess_raw_doc(
-            graph_store,
-            info,
-            embedding_model=embed_model,
-            textunit_embedding=emb_map.get(info.textunit_id),
-        )
-        _debug_doc_stats(graph_store, info.doc_id)
+    # 4) 写入 Neo4j
+    # 记录已创建的 Document（避免重复创建）
+    created_docs: set = set()
+    
+    with driver.session(database="neo4j") as session:
+        for info in infos:
+            tu_emb = emb_map.get(info.textunit_id)
+            chunk_content, chunk_id, total_chunks = chunk_meta.get(info.textunit_id, (info.session_text, 1, 1))
 
-    graph_store.close()
+            # 4.1 创建 TextUnit（原文 + embedding + 分块信息）
+            session.run(
+                """
+                MERGE (u:TextUnit {name: $name})
+                SET u.content = $content,
+                    u.doc_id = $doc_id,
+                    u.virtual_time = $virtual_time,
+                    u.turn_id = $turn_id,
+                    u.chunk_id = $chunk_id,
+                    u.total_chunks = $total_chunks,
+                    u.real_time = $real_time,
+                    u.embedding = $embedding,
+                    u.agent_name = $agent_name,
+                    u.channel = $channel,
+                    u.session_id = $session_id,
+                    u.session_time_raw = $session_time_raw,
+                    u.session_time_iso = $session_time_iso
+                """,
+                {
+                    "name": info.textunit_id,
+                    "content": chunk_content,
+                    "doc_id": info.doc_id,
+                    "virtual_time": info.virtual_time,
+                    "turn_id": info.turn_id,
+                    "chunk_id": chunk_id,
+                    "total_chunks": total_chunks,
+                    "real_time": real_time,
+                    "embedding": tu_emb,
+                    "agent_name": agent_name,
+                    "channel": RAW,
+                    "session_id": info.session_id,
+                    "session_time_raw": info.session_time_raw,
+                    "session_time_iso": info.session_time_iso,
+                },
+            )
+
+            # 4.2 创建 Event 并连接 TextUnit
+            session.run(
+                """
+                MERGE (e:Event {event_id: $event_id})
+                SET e.channel = $channel,
+                    e.agent_name = $agent_name,
+                    e.virtual_time = $virtual_time,
+                    e.turn_id = $turn_id,
+                    e.event_timestamp = $event_timestamp,
+                    e.updated_at = $updated_at,
+                    e.session_id = $session_id,
+                    e.session_time_raw = $session_time_raw,
+                    e.session_time_iso = $session_time_iso,
+                    e.event_time_iso = CASE
+                        WHEN $session_time_iso <> '' AND $session_time_iso <> 'unknown' THEN $session_time_iso
+                        WHEN $session_time_raw <> '' AND $session_time_raw <> 'unknown' THEN $session_time_raw
+                        ELSE $virtual_time
+                    END
+                WITH e
+                MATCH (u:TextUnit {name: $textunit})
+                MERGE (e)-[:EVIDENCED_BY]->(u)
+                """,
+                {
+                    "event_id": info.event_id,
+                    "channel": RAW,
+                    "agent_name": agent_name,
+                    "virtual_time": info.virtual_time,
+                    "turn_id": info.turn_id,
+                    "event_timestamp": info.session_time_iso if info.session_time_iso != "unknown" else info.virtual_time,
+                    "updated_at": real_time,
+                    "textunit": info.textunit_id,
+                    "session_id": info.session_id,
+                    "session_time_raw": info.session_time_raw,
+                    "session_time_iso": info.session_time_iso,
+                },
+            )
+
+            # 4.3 创建 __Document__（每个 session 只创建一次）
+            if info.doc_id not in created_docs:
+                # 获取完整的 session 文本
+                full_session_text = build_session_text(info.session_turns, include_assistant=include_assistant)
+                
+                session.run(
+                    """
+                    MERGE (d:__Document__ {id: $doc_id})
+                    ON CREATE SET d.title = $title, d.raw_content = $raw
+                    SET d.agent_name = $agent_name,
+                        d.updated_at = $updated_at,
+                        d.name = coalesce(d.name, $title),
+                        d.session_id = $session_id,
+                        d.session_time_raw = $session_time_raw,
+                        d.session_time_iso = $session_time_iso
+                    """,
+                    {
+                        "doc_id": info.doc_id,
+                        "title": info.session_id or info.doc_id,
+                        "raw": full_session_text,
+                        "agent_name": agent_name,
+                        "updated_at": real_time,
+                        "session_id": info.session_id,
+                        "session_time_raw": info.session_time_raw,
+                        "session_time_iso": info.session_time_iso,
+                    },
+                )
+                created_docs.add(info.doc_id)
+
+            # 4.4 创建 __Chunk__ 并建立关系
+            neo4j_chunk_id = f"{info.doc_id}:{info.textunit_id}"
+            session.run(
+                """
+                MERGE (c:__Chunk__ {id: $chunk_id})
+                SET c.text = $text,
+                    c.agent_name = $agent_name,
+                    c.channel = $channel,
+                    c.virtual_time = $virtual_time,
+                    c.turn_id = $turn_id,
+                    c.session_id = $session_id,
+                    c.session_time_raw = $session_time_raw,
+                    c.session_time_iso = $session_time_iso
+                WITH c
+                MATCH (d:__Document__ {id: $doc_id})
+                MERGE (c)-[:PART_OF]->(d)
+                WITH c
+                MATCH (u:TextUnit {name: $textunit_id})
+                MERGE (u)-[:DERIVED_FROM]->(c)
+                """,
+                {
+                    "chunk_id": neo4j_chunk_id,
+                    "doc_id": info.doc_id,
+                    "text": chunk_content,
+                    "agent_name": agent_name,
+                    "channel": RAW,
+                    "virtual_time": info.virtual_time,
+                    "turn_id": info.turn_id,
+                    "session_id": info.session_id,
+                    "session_time_raw": info.session_time_raw,
+                    "session_time_iso": info.session_time_iso,
+                    "textunit_id": info.textunit_id,
+                },
+            )
+
+            if _DEBUG_INGEST:
+                logger.info(
+                    f"[ingest_longmemoryeval][debug] RAW written: turn_id={info.turn_id} "
+                    f"textunit={info.textunit_id} chunk={chunk_id}/{total_chunks}"
+                )
+
+    driver.close()
     return infos
 
 
@@ -952,15 +1448,12 @@ def consolidate_docs_from_original_text(
     embedding_model=None,
     max_workers: int = 6,
     include_assistant: bool = True,
-    # chunking params
-    max_turns_per_chunk: int = 8,
-    overlap_turns: int = 1,
-    max_chars_per_chunk: int = 6000,
+    max_chars_per_chunk: int = 4000,
 ) -> None:
     """
     Directly read original session text for consolidation:
       - session-level parallelism (worker per session)
-      - chunk within session (window + overlap)
+      - chunk within session (by character count)
       - merge chunk outputs, then write once per session (ordered by turn_id)
     """
     if not doc_infos:
@@ -985,8 +1478,6 @@ def consolidate_docs_from_original_text(
             session_time_iso=info.session_time_iso,
             include_assistant=include_assistant,
             llm=llm,
-            max_turns_per_chunk=max_turns_per_chunk,
-            overlap_turns=overlap_turns,
             max_chars_per_chunk=max_chars_per_chunk,
         )
         return (turn_id, info, res)
@@ -994,7 +1485,7 @@ def consolidate_docs_from_original_text(
     use_workers = max(1, int(max_workers))
     logger.info(
         f"[ingest_longmemoryeval] ORIGINAL_TEXT 并行巩固：docs={len(jobs)} max_workers={use_workers} "
-        f"chunk_turns={max_turns_per_chunk} overlap={overlap_turns}"
+        f"max_chars_per_chunk={max_chars_per_chunk}"
     )
 
     with ThreadPoolExecutor(max_workers=use_workers) as ex:
@@ -1056,9 +1547,7 @@ def ingest_longmemoryeval_sample(
     # consolidation mode
     consolidation_mode: str = "raw_triples",  # raw_triples | original_text
     # original-text chunking
-    original_max_turns_per_chunk: int = 8,
-    original_overlap_turns: int = 1,
-    original_max_chars_per_chunk: int = 6000,
+    original_max_chars_per_chunk: int = 4000,
 ) -> Dict[str, Any]:
     """
     注入一个 task：
@@ -1157,8 +1646,6 @@ def ingest_longmemoryeval_sample(
             embedding_model=getattr(getattr(agent, "memory", None), "embedding_model", None),
             max_workers=consolidation_max_workers,
             include_assistant=include_assistant,
-            max_turns_per_chunk=original_max_turns_per_chunk,
-            overlap_turns=original_overlap_turns,
             max_chars_per_chunk=original_max_chars_per_chunk,
         )
     else:
@@ -1179,6 +1666,7 @@ def ingest_longmemoryeval_sample(
 
     return {
         "question_turn_id": int(question_turn_id),
+        "question_date": question_date,  # ✅ 返回实际的问题日期，用于时间计算
         "num_sessions": int(n),
         "doc_infos": all_doc_infos,
     }

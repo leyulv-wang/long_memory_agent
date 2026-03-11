@@ -155,6 +155,18 @@ class Relationship(CompatModel):
         return self.target_node_label
 
 
+class Claim(CompatModel):
+    text: str = Field(description="Atomic claim text, no metadata tokens.")
+    confidence: float = Field(default=1.0, description="Confidence score 0-1.")
+    knowledge_type: str = Field(default="observed_fact", description="observed_fact | inferred | reported.")
+    source_of_belief: str = Field(default="user_statement", description="user_statement | assistant_statement | tool | derived.")
+    event_time_text: Optional[str] = Field(default=None, description="Explicit time text if present.")
+    event_turn_offset: Optional[int] = Field(default=None, description="Relative turn offset if present.")
+
+
 class KnowledgeGraphExtraction(CompatModel):
-    nodes: List[Node] = Field(description="List of all extracted nodes.")
-    relationships: List[Relationship] = Field(description="List of all relationships.")
+    nodes: List[Node] = Field(default_factory=list, description="List of all extracted nodes.")
+    relationships: List[Relationship] = Field(default_factory=list, description="List of all relationships.")
+    facts: List[str] = Field(default_factory=list, description="List of extracted fact strings (legacy).")
+    insights: List[str] = Field(default_factory=list, description="List of insight strings (legacy).")
+    claims: List[Claim] = Field(default_factory=list, description="Structured claim objects.")

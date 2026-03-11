@@ -14,3 +14,4 @@ python-levenshtein==0.25.1
 langsmith==0.1.75
 graphrag[llm,storage,workflows]>=1.0.0
 pyyaml>=6.0
+instructor>=1.0.0
