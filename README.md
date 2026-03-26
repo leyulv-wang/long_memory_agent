@@ -110,8 +110,8 @@ cp LongMemEval/data/*.json data/long_memory_eval/
 ```
 data/
 └── long_memory_eval/
-    ├── sampled_test_questions.json    # Sample setting
-    └── medium_test_questions.json     # Hard setting
+    ├── longmemeval_oracle.json   # Sample setting
+    └── longmemeval_s.json     # Hard setting
 ```
 
 ## Configuration
@@ -217,30 +217,65 @@ python test/Long_Memory_test.py
 ```bash
 python test/Long_Memory_test.py [OPTIONS]
 
-Options:
-  --data_path PATH       Path to LongMemEval test file
+Basic Options:
+  --data PATH            Path to LongMemEval test file
                          Default: data/long_memory_eval/sampled_test_questions.json
   
-  --output_path PATH     Path to save results (JSONL format)
-                         Default: result/simple/long_memory_results.jsonl
+  --output PATH          Path to save results (JSONL format)
+                         Default: test/long_memory_results.json
   
-  --clear               Clear Neo4j database before running
-                         Default: False (keep existing data)
+  --no-debug            Disable debug mode (debug is ON by default)
+
+Slicing Options (for testing subsets):
+  --limit N             Process only first N test cases
+  
+  --start N             Start from index N (0-based)
+  
+  --end N               End at index N (exclusive)
+  
+  --indices "0,3,4"     Process specific indices (comma-separated)
+
+Parallel Execution Options (advanced):
+  --full                Run full dataset with parallel execution
+  
+  --parallel            Run local + Aura in parallel with auto split
+  
+  --queue-init          Initialize a dynamic queue for workers
+  
+  --queue-worker        Run as a dynamic queue worker
+  
+  --queue-parallel      Init queue + run workers + merge results
+  
+  --queue-path PATH     Path to queue file (default: test/long_memory_queue.json)
+  
+  --queue-results PATH  Path to queue results (default: test/long_memory_results.queue.jsonl)
 ```
 
 ### Example Commands
 
 ```bash
-# Run on sample setting (default)
+# 1. Run on sample setting (default)
 python test/Long_Memory_test.py
 
-# Run on hard setting
+# 2. Run on hard setting
 python test/Long_Memory_test.py \
-    --data_path data/long_memory_eval/medium_test_questions.json \
-    --output_path result/medium/long_memory_results.jsonl
+    --data data/long_memory_eval/medium_test_questions.json \
+    --output result/medium/long_memory_results.jsonl
 
-# Clear database and run fresh
-python test/Long_Memory_test.py --clear
+# 3. Test with first 10 cases only
+python test/Long_Memory_test.py --limit 10
+
+# 4. Test specific range (cases 0-50)
+python test/Long_Memory_test.py --start 0 --end 50
+
+# 5. Test specific cases
+python test/Long_Memory_test.py --indices "0,5,10,15"
+
+# 6. Run full dataset with parallel execution
+python test/Long_Memory_test.py --full
+
+# 7. Disable debug output
+python test/Long_Memory_test.py --no-debug
 ```
 
 ### Expected Output
@@ -265,10 +300,10 @@ Results format:
 
 ```bash
 # Check output file
-ls -lh result/simple/long_memory_results.jsonl
+ls -lh test/long_memory_results.json
 
 # Count total questions processed
-wc -l result/simple/long_memory_results.jsonl
+wc -l test/long_memory_results.json
 ```
 
 ### Embedding Server
