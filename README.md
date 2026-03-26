@@ -111,7 +111,7 @@ cp LongMemEval/data/*.json data/long_memory_eval/
 data/
 └── long_memory_eval/
     ├── longmemeval_oracle.json   # Sample setting
-    └── longmemeval_s.json     # Hard setting
+    └── longmemeval_s.json        # Hard setting
 ```
 
 ## Configuration
@@ -201,23 +201,14 @@ python utils/init_neo4j_schema.py
 python utils/create_fulltext_index.py
 
 # Run evaluation
-python test/Long_Memory_test.py --data data/long_memory_eval/sampled_test_questions.json
+python test/Long_Memory_test.py
 ```
 
 Results will be saved to `test/long_memory_results.json`
 
-### Test Different Settings
-
-```bash
-# Sample setting (default)
-python test/Long_Memory_test.py
-
-# Hard setting
-python test/Long_Memory_test.py --data data/long_memory_eval/medium_test_questions.json
-
-# Test first 10 cases only
-python test/Long_Memory_test.py --limit 10
-```
+**Note**: To test different settings (sample/hard), modify the `DEFAULT_DATA_PATH` in `test/Long_Memory_test.py`:
+- Sample setting: `data/long_memory_eval/longmemeval_oracle.json`
+- Hard setting: `data/long_memory_eval/longmemeval_s.json`
 
 ### Embedding Server
 
