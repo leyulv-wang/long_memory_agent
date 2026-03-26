@@ -376,15 +376,33 @@ EMBED_MAX_CONCURRENCY=1
 
 ## Evaluation Results
 
-Performance on LongMemEval benchmark:
+Performance comparison on LongMemEval benchmark:
 
-| Method | Overall Acc. (Sample) | Overall Acc. (Hard) |
-|--------|----------------------|---------------------|
-| LLM    | 0.7500               | 0.4138              |
-| RAG    | 0.6724               | 0.5172              |
-| Mem0   | 0.5690               | 0.2759              |
-| GA     | 0.5862               | 0.2414              |
-| **DuMF-Agent** | **0.7241**   | **0.5517**          |
+![Accuracy Comparison](accuracy_comparison.png)
+
+### Baseline Methods
+
+- **LLM**: Direct LLM prompting with full conversation history
+- **RAG**: Retrieval-augmented generation with vector search
+- **Mem0**: Memory layer with fact extraction and consolidation
+- **LangMem**: Language-based memory system
+- **LightMem**: Lightweight memory architecture
+- **Generative Agent**: Stanford's generative agents with memory stream (recency, importance, relevance scoring)
+- **DuMF-Agent (ours)**: Dual-channel memory framework with structured reasoning and temporal consistency
+
+### Results Summary
+
+| Method | Sample Accuracy | Hard Accuracy |
+|--------|----------------|---------------|
+| LLM | 76.29% | 56.08% |
+| RAG | 67.67% | 50.68% |
+| Mem0 | 52.16% | 32.65% |
+| LangMem | 62.14% | 47.00% |
+| LightMem | 61.60% | 50.80% |
+| Generative Agent | 62.07% | 22.45% |
+| **DuMF-Agent (ours)** | **72.41%** | **67.35%** |
+
+DuMF-Agent achieves the best performance on the Hard setting (67.35% accuracy), demonstrating superior capability in handling long-term conversational memory with complex reasoning requirements.
 
 ## License
 
