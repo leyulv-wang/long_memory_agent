@@ -94,37 +94,24 @@ python embedding_server.py
 
 This project uses the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark for evaluation.
 
-### Step 1: Download Dataset
+### Download Dataset
 
 ```bash
 # Clone LongMemEval repository
 git clone https://github.com/xiaowu0162/LongMemEval.git
 
 # Copy test files to your project
-cp LongMemEval/data/sampled_test_questions.json data/long_memory_eval/
-cp LongMemEval/data/medium_test_questions.json data/long_memory_eval/
+mkdir -p data/long_memory_eval
+cp LongMemEval/data/*.json data/long_memory_eval/
 ```
 
-### Step 2: Verify Directory Structure
+### Verify Directory Structure
 
 ```
 data/
-├── long_memory_eval/
-│   ├── sampled_test_questions.json    # Sample setting (required)
-│   └── medium_test_questions.json     # Hard setting (required)
-├── books/                              # Character profiles (optional)
-└── world_knowledge/                    # World knowledge base (optional)
-```
-
-### Step 3: Verify Data Files
-
-```bash
-# Check if files exist
-ls -lh data/long_memory_eval/
-
-# Expected output:
-# sampled_test_questions.json  (~2-5 MB)
-# medium_test_questions.json   (~10-20 MB)
+└── long_memory_eval/
+    ├── sampled_test_questions.json    # Sample setting
+    └── medium_test_questions.json     # Hard setting
 ```
 
 ## Configuration
@@ -202,129 +189,87 @@ agent = DuMFAgent(agent_id="user_001")
 response = agent.chat("What did we discuss about the project last week?")
 ```
 
-## Running Experiments
+## Running LongMemEval Evaluation
 
-### Quick Start: Sample Setting
+### Test Script: `test/Long_Memory_test.py`
+
+This is the main evaluation script for reproducing LongMemEval benchmark results.
+
+### Quick Start
 
 ```bash
 # 1. Ensure Neo4j is running
-neo4j status
+neo4j start
 
-# 2. Clear previous data (optional)
-python utils/clear_long_term_memory.py
-
-# 3. Run evaluation on sample setting
-python test/Long_Memory_test.py
-
-# 4. Check results
-cat result/simple/long_memory_results.jsonl
-```
-
-### Full Reproduction Steps
-
-#### Step 1: Verify Environment
-
-```bash
-# Test Neo4j connection
-python utils/connection_tests.py
-
-# Expected output:
-# ✓ Neo4j connection successful
-# ✓ LLM API connection successful
-# ✓ Embedding model loaded
-```
-
-#### Step 2: Initialize Database
-
-```bash
-# Create Neo4j schema and indexes
+# 2. Initialize database schema
 python utils/init_neo4j_schema.py
 python utils/create_fulltext_index.py
 
-# Expected output:
-# ✓ Created constraints and indexes
-# ✓ Fulltext index created
+# 3. (Optional) Start local embedding server
+python embedding_server.py  # Run in separate terminal
+
+# 4. Run evaluation
+python test/Long_Memory_test.py
 ```
 
-#### Step 3: Start Embedding Server (if using local)
+### Command Line Options
 
 ```bash
-# Terminal 1: Start embedding server
-python embedding_server.py
+python test/Long_Memory_test.py [OPTIONS]
 
-# Expected output:
-# INFO: Uvicorn running on http://127.0.0.1:8000
-# Model loaded: BAAI/bge-m3
+Options:
+  --data_path PATH       Path to LongMemEval test file
+                         Default: data/long_memory_eval/sampled_test_questions.json
+  
+  --output_path PATH     Path to save results (JSONL format)
+                         Default: result/simple/long_memory_results.jsonl
+  
+  --clear               Clear Neo4j database before running
+                         Default: False (keep existing data)
 ```
 
-#### Step 4: Run Evaluation
+### Example Commands
 
 ```bash
-# Terminal 2: Run test
+# Run on sample setting (default)
 python test/Long_Memory_test.py
 
-# Command line options:
-# --data_path: Path to test questions (default: data/long_memory_eval/sampled_test_questions.json)
-# --output_path: Path to save results (default: result/simple/long_memory_results.jsonl)
-# --clear: Clear database before running (default: False)
-
-# Example with options:
+# Run on hard setting
 python test/Long_Memory_test.py \
     --data_path data/long_memory_eval/medium_test_questions.json \
-    --output_path result/medium/long_memory_results.jsonl \
-    --clear
+    --output_path result/medium/long_memory_results.jsonl
+
+# Clear database and run fresh
+python test/Long_Memory_test.py --clear
 ```
 
-#### Step 5: Verify Results
+### Expected Output
 
-```bash
-# Check output file
-ls -lh result/simple/long_memory_results.jsonl
+The script will:
+1. Load test questions from the specified file
+2. Process each conversation history and build memory
+3. Answer each question using the memory system
+4. Save results to the output file (one JSON object per line)
 
-# Count total questions
-wc -l result/simple/long_memory_results.jsonl
-
-# View sample results
-head -n 5 result/simple/long_memory_results.jsonl | jq .
-```
-
-### Expected Output Format
-
-Each line in the result file is a JSON object:
-
+Results format:
 ```json
 {
   "task_id": "task_001",
   "question": "What is my favorite color?",
   "predicted_answer": "Your favorite color is blue.",
-  "ground_truth": "blue",
-  "evidence_ids": [1, 5, 12],
-  "retrieval_time": 0.234,
-  "generation_time": 1.567
+  "ground_truth": "blue"
 }
 ```
 
-### Running Ablation Experiments
+### Verify Results
 
 ```bash
-# Disable structured memory
-export DISABLE_STRUCTURED_MEMORY=1
-python test/Long_Memory_test.py --output_path result/ablation/no_structured.jsonl
+# Check output file
+ls -lh result/simple/long_memory_results.jsonl
 
-# Disable RAW channel
-export DISABLE_RAW_CHANNEL=1
-python test/Long_Memory_test.py --output_path result/ablation/no_raw.jsonl
-
-# Disable query expansion
-export DISABLE_QUERY_EXPAND=1
-python test/Long_Memory_test.py --output_path result/ablation/no_expand.jsonl
-
-# Disable temporal modeling
-export DISABLE_TEMPORAL_MODEL=1
-python test/Long_Memory_test.py --output_path result/ablation/no_temporal.jsonl
+# Count total questions processed
+wc -l result/simple/long_memory_results.jsonl
 ```
-
-See `Appendix_DuMF_Agent.tex` for complete ablation configuration details.
 
 ### Embedding Server
 
@@ -361,9 +306,7 @@ DuMF-Agent/
 
 ## Troubleshooting
 
-### Common Issues
-
-#### 1. Neo4j Connection Failed
+### Neo4j Connection Failed
 
 ```bash
 # Check if Neo4j is running
@@ -372,66 +315,29 @@ neo4j status
 # Start Neo4j
 neo4j start
 
-# Check connection
-python -c "from neo4j import GraphDatabase; driver = GraphDatabase.driver('neo4j://localhost:7687', auth=('neo4j', 'your-password')); driver.verify_connectivity(); print('✓ Connected')"
+# Verify connection
+python utils/connection_tests.py
 ```
 
-#### 2. Embedding Server Not Responding
+### Embedding Server Issues
 
 ```bash
-# Check if server is running
+# If using local embedding, check server status
 curl http://127.0.0.1:8000/health
 
-# Restart server
-pkill -f embedding_server.py
-python embedding_server.py
+# Alternative: Use online embedding API
+# Edit .env:
+GRAPHRAG_EMBEDDING_API_BASE=https://api.siliconflow.cn/v1
+GRAPHRAG_EMBEDDING_API_KEY=your-api-key
 ```
 
-#### 3. Out of Memory
+### Out of Memory
 
 ```bash
 # Reduce batch size in .env
 EMBED_BATCH_SIZE=1
 EMBED_MAX_CONCURRENCY=1
-
-# Or use online embedding API instead of local
-GRAPHRAG_EMBEDDING_API_BASE=https://api.siliconflow.cn/v1
-GRAPHRAG_EMBEDDING_API_KEY=your-api-key
 ```
-
-#### 4. API Rate Limit
-
-```bash
-# Use multiple API keys for load balancing
-CHEAP_GRAPHRAG_CHAT_API_KEY_A=sk-key-1
-CHEAP_GRAPHRAG_CHAT_API_KEY_B=sk-key-2
-```
-
-#### 5. Test Data Not Found
-
-```bash
-# Verify data files exist
-ls -lh data/long_memory_eval/
-
-# If missing, download from LongMemEval repository
-git clone https://github.com/xiaowu0162/LongMemEval.git
-cp LongMemEval/data/*.json data/long_memory_eval/
-```
-
-### Performance Optimization
-
-#### For Faster Evaluation
-
-1. Use online embedding API (faster than local on CPU)
-2. Increase `EMBED_MAX_CONCURRENCY` if using remote API
-3. Use SSD for Neo4j database storage
-4. Allocate more memory to Neo4j (edit `neo4j.conf`)
-
-#### For Lower Cost
-
-1. Use local embedding model (free but slower)
-2. Use cheaper LLM models (e.g., gpt-3.5-turbo)
-3. Reduce retrieval top-k values in `config.py`
 
 ## Evaluation Results
 
@@ -444,25 +350,6 @@ Performance on LongMemEval benchmark:
 | Mem0   | 0.5690               | 0.2759              |
 | GA     | 0.5862               | 0.2414              |
 | **DuMF-Agent** | **0.7241**   | **0.5517**          |
-
-### Reproducing Results
-
-To reproduce the results in the paper:
-
-```bash
-# 1. Sample setting
-python test/Long_Memory_test.py \
-    --data_path data/long_memory_eval/sampled_test_questions.json \
-    --output_path result/simple/long_memory_results.jsonl
-
-# 2. Hard setting
-python test/Long_Memory_test.py \
-    --data_path data/long_memory_eval/medium_test_questions.json \
-    --output_path result/medium/long_memory_results.jsonl
-
-# 3. Calculate metrics (if evaluation script available)
-python evaluate_results.py result/simple/long_memory_results.jsonl
-```
 
 ## License
 
