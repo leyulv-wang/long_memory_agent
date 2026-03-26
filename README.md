@@ -191,119 +191,32 @@ response = agent.chat("What did we discuss about the project last week?")
 
 ## Running LongMemEval Evaluation
 
-### Test Script: `test/Long_Memory_test.py`
-
-This is the main evaluation script for reproducing LongMemEval benchmark results.
-
 ### Quick Start
 
-```bash
-# 1. Ensure Neo4j is running
-neo4j start
+Once you have the dataset and Neo4j database ready:
 
-# 2. Initialize database schema
+```bash
+# Initialize database schema (first time only)
 python utils/init_neo4j_schema.py
 python utils/create_fulltext_index.py
 
-# 3. (Optional) Start local embedding server
-python embedding_server.py  # Run in separate terminal
-
-# 4. Run evaluation
-python test/Long_Memory_test.py
+# Run evaluation
+python test/Long_Memory_test.py --data data/long_memory_eval/sampled_test_questions.json
 ```
 
-### Command Line Options
+Results will be saved to `test/long_memory_results.json`
+
+### Test Different Settings
 
 ```bash
-python test/Long_Memory_test.py [OPTIONS]
-
-Basic Options:
-  --data PATH            Path to LongMemEval test file
-                         Default: data/long_memory_eval/sampled_test_questions.json
-  
-  --output PATH          Path to save results (JSONL format)
-                         Default: test/long_memory_results.json
-  
-  --no-debug            Disable debug mode (debug is ON by default)
-
-Slicing Options (for testing subsets):
-  --limit N             Process only first N test cases
-  
-  --start N             Start from index N (0-based)
-  
-  --end N               End at index N (exclusive)
-  
-  --indices "0,3,4"     Process specific indices (comma-separated)
-
-Parallel Execution Options (advanced):
-  --full                Run full dataset with parallel execution
-  
-  --parallel            Run local + Aura in parallel with auto split
-  
-  --queue-init          Initialize a dynamic queue for workers
-  
-  --queue-worker        Run as a dynamic queue worker
-  
-  --queue-parallel      Init queue + run workers + merge results
-  
-  --queue-path PATH     Path to queue file (default: test/long_memory_queue.json)
-  
-  --queue-results PATH  Path to queue results (default: test/long_memory_results.queue.jsonl)
-```
-
-### Example Commands
-
-```bash
-# 1. Run on sample setting (default)
+# Sample setting (default)
 python test/Long_Memory_test.py
 
-# 2. Run on hard setting
-python test/Long_Memory_test.py \
-    --data data/long_memory_eval/medium_test_questions.json \
-    --output result/medium/long_memory_results.jsonl
+# Hard setting
+python test/Long_Memory_test.py --data data/long_memory_eval/medium_test_questions.json
 
-# 3. Test with first 10 cases only
+# Test first 10 cases only
 python test/Long_Memory_test.py --limit 10
-
-# 4. Test specific range (cases 0-50)
-python test/Long_Memory_test.py --start 0 --end 50
-
-# 5. Test specific cases
-python test/Long_Memory_test.py --indices "0,5,10,15"
-
-# 6. Run full dataset with parallel execution
-python test/Long_Memory_test.py --full
-
-# 7. Disable debug output
-python test/Long_Memory_test.py --no-debug
-```
-
-### Expected Output
-
-The script will:
-1. Load test questions from the specified file
-2. Process each conversation history and build memory
-3. Answer each question using the memory system
-4. Save results to the output file (one JSON object per line)
-
-Results format:
-```json
-{
-  "task_id": "task_001",
-  "question": "What is my favorite color?",
-  "predicted_answer": "Your favorite color is blue.",
-  "ground_truth": "blue"
-}
-```
-
-### Verify Results
-
-```bash
-# Check output file
-ls -lh test/long_memory_results.json
-
-# Count total questions processed
-wc -l test/long_memory_results.json
 ```
 
 ### Embedding Server
@@ -385,7 +298,7 @@ Performance comparison on LongMemEval benchmark:
 - **LLM**: Direct LLM prompting with full conversation history
 - **RAG**: Retrieval-augmented generation with vector search
 - **Mem0**: Memory layer with fact extraction and consolidation
-- **LangMem**: Language-based memory system
+- **LangMem**: LangChain-based memory system
 - **LightMem**: Lightweight memory architecture
 - **Generative Agent**: Stanford's generative agents with memory stream (recency, importance, relevance scoring)
 - **DuMF-Agent (ours)**: Dual-channel memory framework with structured reasoning and temporal consistency
