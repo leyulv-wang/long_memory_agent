@@ -206,9 +206,14 @@ python test/Long_Memory_test.py
 
 Results will be saved to `test/long_memory_results.json`
 
-**Note**: To test different settings (sample/hard), modify the `DEFAULT_DATA_PATH` in `test/Long_Memory_test.py`:
-- Sample setting: `data/long_memory_eval/longmemeval_oracle.json`
-- Hard setting: `data/long_memory_eval/longmemeval_s.json`
+**Note**: To test different settings (sample/hard), modify the `DEFAULT_DATA_PATH` in `test/Long_Memory_test.py` (line 47):
+- Sample setting: `"data/long_memory_eval/longmemeval_oracle.json"`
+- Hard setting: `"data/long_memory_eval/longmemeval_s.json"`
+
+Or use command line argument:
+```bash
+python test/Long_Memory_test.py --data data/long_memory_eval/longmemeval_s.json
+```
 
 ### Embedding Server
 
