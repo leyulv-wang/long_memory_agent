@@ -40,9 +40,13 @@ A long-term memory architecture for conversational AI that addresses memory frag
 
 ## Key Features
 
-- **Three-Layer Memory Representation**: Evidence (RAW/TextUnit), Language (SimpleFact), and Structure (Structured Triple) layers with cross-references for traceable reasoning
-- **Retrieval-Reading Closed-Loop**: Query expansion, hybrid retrieval (vector + BM25 + multi-hop), and unified re-ranking with confidence-aware scoring
-- **Temporal Version Consistency**: Append-only storage with dynamic version detection to distinguish current vs. historical facts
+- **Dual-Channel Memory Architecture**: RAW channel preserves evidence completeness; CONSOLIDATED channel structures facts for efficient retrieval — balances completeness and retrieval efficiency
+- **Triple-SimpleFact Separation**: Structured Triple layer optimized for multi-hop reasoning; SimpleFact layer optimized for direct QA — decoupled optimization
+- **Generalized Extractor**: Entities and relation types dynamically extracted from text without hardcoded schemas
+- **Multi-Factor Comprehensive Scoring**: Fusion of semantic similarity, confidence, channel priority, and temporal decay for unified retrieval ranking
+- **Dual-Dimensional Temporal Decay**: Time-aware weighting combining real-world timestamps and conversation turns for cross-session and intra-session reasoning
+- **Append-Only Full Retention Storage**: No deletion — all historical versions preserved, enabling version tracking and temporal queries
+- **Hybrid Retrieval + Query Expansion**: Vector similarity search, BM25 full-text search, and multi-hop graph traversal with query expansion
 
 ## Installation
 
@@ -56,8 +60,8 @@ A long-term memory architecture for conversational AI that addresses memory frag
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/DuMF-Agent.git
-cd DuMF-Agent
+git clone https://github.com/leyulv-wang/long_memory_agent.git --branch v1.0.0
+cd long_memory_agent
 ```
 
 2. Create virtual environment:
@@ -231,12 +235,12 @@ For online embedding API, configure SiliconFlow or other providers in `.env`.
 ## Project Structure
 
 ```
-DuMF-Agent/
+long_memory_agent/
 ├── agent/                  # Core agent implementation
 │   ├── agent.py           # Main agent class
 │   ├── simple_retriever.py # Hybrid retrieval system
 │   └── context_builder.py  # Context construction
-├── memory/                 # Memory system
+├── memory/                 # Dual-channel memory system
 │   ├── dual_memory_system.py
 │   ├── structured_memory.py
 │   └── stores.py
