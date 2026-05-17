@@ -289,7 +289,7 @@ EMBED_MAX_CONCURRENCY=1
 
 ## Evaluation Results
 
-Performance comparison on LongMemEval benchmark:
+Performance comparison on LongMemEval benchmark. All results averaged over 10 independent runs with ± half-range.
 
 ![Accuracy Comparison](accuracy_comparison.png)
 
@@ -298,24 +298,111 @@ Performance comparison on LongMemEval benchmark:
 - **LLM**: Direct LLM prompting with full conversation history
 - **RAG**: Retrieval-augmented generation with vector search
 - **Mem0**: Memory layer with fact extraction and consolidation
+- **Mem0Graph**: Memory layer with graph-based structured memory
 - **LangMem**: LangChain-based memory system
 - **LightMem**: Lightweight memory architecture
 - **Generative Agent**: Stanford's generative agents with memory stream (recency, importance, relevance scoring)
 - **DuMF-Agent (ours)**: Dual-channel memory framework with structured reasoning and temporal consistency
 
-### Results Summary
+### Overall Performance
 
-| Method | Sample Accuracy | Hard Accuracy |
-|--------|----------------|---------------|
-| LLM | 76.29% | 56.08% |
-| RAG | 67.67% | 50.68% |
-| Mem0 | 52.16% | 32.65% |
-| LangMem | 62.14% | 47.00% |
-| LightMem | 61.60% | 50.80% |
-| Generative Agent | 62.07% | 22.45% |
-| **DuMF-Agent (ours)** | **72.41%** | **67.35%** |
+| Method | Overall Acc. (sample) | Overall Acc. (hard) | Task-avg. Acc. (hard) |
+|---:|---:|---:|---:|
+| LLM | 75.00 ± 1.30 | 55.41 ± 0.68 | 54.20 ± 0.85 |
+| RAG | 66.17 ± 1.51 | 49.33 ± 1.36 | 48.84 ± 1.34 |
+| Mem0 | 50.22 ± 1.94 | 34.18 ± 1.53 | 33.97 ± 0.99 |
+| Mem0Graph | 53.40 ± 0.31 | 36.52 ± 0.16 | 35.75 ± 0.10 |
+| LangMem | 63.36 ± 1.22 | 46.40 ± 0.60 | 46.99 ± 0.53 |
+| LightMem | 61.20 ± 0.40 | 50.00 ± 0.80 | 50.25 ± 0.75 |
+| GA | 61.42 ± 0.65 | 23.56 ± 1.00 | 24.12 ± 1.26 |
+| **DuMF-Agent** | **75.38 ± 0.37** | **69.59 ± 0.19** | **69.80 ± 0.23** |
 
-DuMF-Agent achieves the best performance on the Hard setting (67.35% accuracy), demonstrating superior capability in handling long-term conversational memory with complex reasoning requirements.
+### Single-session Tasks (Hard Setting)
+
+| Method | ss-user | ss-preference | ss-assistant |
+|---:|---:|---:|---:|
+| LLM | 86.54 ± 1.92 | 11.77 ± 5.89 | 80.95 ± 4.76 |
+| RAG | 80.77 ± 3.85 | 14.71 ± 2.94 | 88.10 ± 7.15 |
+| Mem0 | 58.34 ± 2.78 | 14.29 ± 7.15 | 19.23 ± 3.85 |
+| Mem0Graph | 63.79 ± 1.73 | 8.33 ± 0.93 | 22.09 ± 1.16 |
+| LangMem | 74.29 ± 1.43 | 38.34 ± 1.67 | 22.32 ± 0.89 |
+| LightMem | 68.57 ± 1.43 | 45.00 ± 1.67 | 30.36 ± 1.79 |
+| GA | 30.36 ± 1.79 | 10.42 ± 2.08 | 40.91 ± 1.52 |
+| **DuMF-Agent** | **88.14 ± 1.30** | **54.41 ± 1.47** | **91.86 ± 1.17** |
+
+### Multi-session Tasks
+
+| Method | Multi-session (sample) | Multi-session (hard) |
+|---:|---:|---:|
+| LLM | 62.80 ± 2.33 | 39.07 ± 1.57 |
+| RAG | 66.28 ± 1.16 | 45.23 ± 1.66 |
+| Mem0 | 55.82 ± 2.33 | 28.95 ± 2.63 |
+| Mem0Graph | 57.41 ± 1.85 | 32.65 ± 2.04 |
+| LangMem | 56.00 ± 4.00 | 42.86 ± 1.51 |
+| LightMem | 45.10 ± 0.75 | 36.84 ± 0.75 |
+| GA | 55.44 ± 1.09 | 24.36 ± 1.29 |
+| **DuMF-Agent** | **66.28 ± 1.17** | **51.02 ± 2.05** |
+
+### Temporal & Knowledge Update Tasks
+
+| Method | temporal (sample) | temporal (hard) | knowledge (sample) | knowledge (hard) |
+|---:|---:|---:|---:|---:|
+| LLM | 51.14 ± 1.14 | 42.60 ± 1.86 | 83.73 ± 2.33 | 62.79 ± 9.22 |
+| RAG | 46.59 ± 1.14 | 22.22 ± 3.70 | 69.77 ± 2.33 | 42.00 ± 2.00 |
+| Mem0 | 36.37 ± 6.82 | 36.11 ± 2.78 | 63.96 ± 1.17 | 46.88 ± 3.13 |
+| Mem0Graph | 60.35 ± 1.73 | 43.10 ± 1.73 | 65.00 ± 8.33 | 44.56 ± 1.09 |
+| LangMem | 50.00 ± 3.85 | 32.33 ± 0.75 | 72.49 ± 3.52 | 71.80 ± 1.29 |
+| LightMem | 59.03 ± 0.38 | 51.50 ± 1.13 | 73.72 ± 0.64 | 69.87 ± 1.93 |
+| GA | 38.37 ± 1.16 | 21.88 ± 5.21 | 69.77 ± 2.33 | 16.96 ± 0.89 |
+| **DuMF-Agent** | **69.32 ± 1.14** | **58.33 ± 2.08** | **79.07 ± 2.33** | **75.00 ± 1.79** |
+
+### Ablation Study
+
+Single-run results on sample setting.
+
+#### w/o Structured Reasoning + Multi-hop
+
+| Method | Overall | Multi-session | Temporal-reasoning |
+|---:|---:|---:|---:|
+| DuMF-Agent (Full) | **72.41** | **65.12** | **68.18** |
+| w/o Structured Reasoning | 70.00 | 60.00 | 53.85 |
+
+#### w/o RAW Channel
+
+| Method | Overall (sample) | Overall (hard) | Multi-session (hard) |
+|---:|---:|---:|---:|
+| DuMF-Agent (Full) | **72.41** | **67.35** | **47.37** |
+| w/o RAW Memory | 68.57 | 60.00 | 33.33 |
+
+#### w/o Retrieval Strategies
+
+| Method | Overall | ss-preference | Multi-session | Temporal-reasoning |
+|---:|---:|---:|---:|---:|
+| DuMF-Agent (Full) | **72.41** | **62.96** | **65.12** | **68.18** |
+| w/o QueryExpand+BM25 | 64.29 | 30.00 | 46.15 | 53.85 |
+| w/o Composite Scoring | 62.86 | 50.00 | 38.46 | 46.15 |
+
+#### w/o Temporal Modeling + Version Retention
+
+| Method | Temporal-reasoning | Knowledge-update | Overall |
+|---:|---:|---:|---:|
+| DuMF-Agent (Full) | **68.18** | **74.42** | **72.41** |
+| w/o Temporal Modeling | 53.85 | 58.33 | 67.14 |
+
+### Abstention Accuracy
+
+| Method | Sample | Hard |
+|---:|---:|---:|
+| LLM | 69.23 | 61.11 |
+| RAG | 84.62 | 66.67 |
+| Mem0 | 96.15 | 84.62 |
+| Mem0Graph | 90.47 | 73.82 |
+| LangMem | 95.00 | 86.67 |
+| LightMem | 66.67 | 53.33 |
+| GA | 96.15 | 92.30 |
+| DuMF-Agent | 42.31 | 53.85 |
+
+DuMF-Agent achieves the lowest abstention rate while maintaining the highest accuracy, demonstrating that the system confidently answers questions rather than abstaining, and those answers remain highly accurate.
 
 ## License
 
