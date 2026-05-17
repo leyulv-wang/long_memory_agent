@@ -291,7 +291,7 @@ EMBED_MAX_CONCURRENCY=1
 
 Performance comparison on LongMemEval benchmark. All results averaged over 10 independent runs with ± half-range.
 
-![Accuracy Comparison](accuracy_comparison.png)
+![Accuracy Comparison](accuracy_comparison.png?v=2)
 
 ### Baseline Methods
 
